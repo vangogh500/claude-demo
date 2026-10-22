@@ -1,4 +1,7 @@
+<<<<<<< HEAD
 /target/
+=======
+>>>>>>> 2abb805 (chore: initialize beads issue tracking)
 
 # Beads / Dolt files (added by bd init)
 .dolt/
@@ -6,6 +9,9 @@
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+<<<<<<< HEAD
 /.claude/worktrees/
 /.worktrees/
 /.spec-notes/
+=======
+>>>>>>> 2abb805 (chore: initialize beads issue tracking)
