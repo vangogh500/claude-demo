@@ -35,7 +35,7 @@ const state = {
   room: null,            // built from room_snapshot, updated by events
 };
 
-// The Scale, in order (GLOSSARY.md).
+// The Scale, in order (GLOSSARY.md); keep in sync with SCALE in src/room.rs.
 const SCALE = ["0", "1", "2", "3", "5", "8", "13", "20", "40", "100", "?"];
 
 let socket = null;
@@ -96,6 +96,7 @@ function apply(ev) {
     case "participant_left":
       room.participants = room.participants.filter((p) => p.id !== ev.participant_id);
       room.voted.delete(ev.participant_id);
+      if (room.votes !== null) delete room.votes[ev.participant_id];
       break;
     case "facilitator_changed":
       room.facilitatorId = ev.participant_id;
@@ -115,6 +116,25 @@ function apply(ev) {
       break;
     case "vote_cast":
       room.voted.add(ev.participant_id);
+      break;
+    case "votes_revealed":
+      for (const item of room.items) if (item.id === ev.item_id) item.state = "Revealed";
+      room.votes = ev.votes;   // object keyed by participant id as a string
+      break;
+    case "votes_cleared":
+      for (const item of room.items) if (item.id === ev.item_id) item.state = "Voting";
+      room.voted = new Set();
+      room.votes = null;
+      room.myVote = null;
+      break;
+    case "item_estimated":
+      for (const item of room.items) {
+        if (item.id === ev.item_id) { item.state = "Estimated"; item.result = ev.result; }
+      }
+      room.activeItemId = null;
+      room.voted = new Set();
+      room.votes = null;
+      room.myVote = null;
       break;
     case "error":
       state.connecting = false;
@@ -206,6 +226,41 @@ function renderItems() {
   }));
 }
 
+function activeItem() {
+  const room = state.room;
+  return room.items.find((item) => item.id === room.activeItemId);
+}
+
+// Reveal and the revealed Votes. Votes are listed in Scale order, ? last, with
+// no aggregate figure. A snapshot carries no values (claude-demo-j9o), so a
+// Participant who joined after Reveal sees a notice instead.
+function renderReveal() {
+  const room = state.room;
+  const active = activeItem();
+  const isFacilitator = room.facilitatorId === room.you;
+  if (!active) return [];
+  if (active.state === "Voting") {
+    if (!isFacilitator) return [];
+    return [h("button", { onclick: () => send({ type: "reveal" }), disabled: room.voted.size === 0 }, "Reveal")];
+  }
+  if (active.state !== "Revealed") return [];
+  const out = [h("h2", {}, "Votes")];
+  if (room.votes === null) {
+    out.push(h("p", {}, "The Votes were revealed before you joined."));
+  } else {
+    const nameOf = (id) => (room.participants.find((p) => String(p.id) === id) || { name: id }).name;
+    const rows = Object.entries(room.votes).sort((a, b) => SCALE.indexOf(a[1]) - SCALE.indexOf(b[1]));
+    out.push(h("ul", {}, ...rows.map(([id, value]) => h("li", {}, nameOf(id) + ": " + value))));
+  }
+  if (isFacilitator) {
+    out.push(h("button", { onclick: () => send({ type: "revote" }) }, "Re-vote"));
+    out.push(h("h2", {}, "Accept a Result"));
+    out.push(h("div", { className: "scale" }, ...SCALE.map((value) =>
+      h("button", { onclick: () => send({ type: "accept", value }) }, value))));
+  }
+  return out;
+}
+
 // The Scale is offered only while the Active Item is Voting, to everyone.
 function renderScale() {
   const room = state.room;
@@ -241,6 +296,7 @@ function renderRoom() {
     h("h2", {}, "Items"),
     renderItems(),
     ...renderScale(),
+    ...renderReveal(),
   ];
 }
 
