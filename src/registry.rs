@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use rand::Rng;
 
-use crate::room::{Actor, Command, ErrorCode, Outcome, Room};
+use crate::room::{Actor, Command, ErrorCode, Outcome, ParticipantId, Room};
 
 /// The characters a Join Code is drawn from: uppercase letters and digits without
 /// the look-alikes `0`/`O` and `1`/`I`.
@@ -31,8 +31,9 @@ pub struct Registry {
 
 impl Registry {
     /// Creates a Room under a Join Code no live Room holds, with `name` as its
-    /// Facilitator, and returns it with the outcome of `create_room`.
-    pub fn create_room(&self, name: String) -> (Arc<HostedRoom>, Outcome) {
+    /// Facilitator, and returns it with the creator's ParticipantId and the outcome
+    /// of `create_room`.
+    pub fn create_room(&self, name: String) -> (Arc<HostedRoom>, ParticipantId, Outcome) {
         let mut rooms = self.rooms.lock().expect("registry lock");
         let join_code = loop {
             let candidate = random_join_code();
@@ -43,12 +44,13 @@ impl Registry {
         let mut room = Room::new(join_code.clone());
         let outcome = room
             .apply(Actor::Newcomer, Command::CreateRoom { name })
-            .expect("a new Room admits its creator");
+            .expect("a new Room accepts create_room");
+        let creator = outcome.admitted.expect("a new Room admits its creator");
         let hosted = Arc::new(HostedRoom {
             room: Mutex::new(room),
         });
         rooms.insert(join_code, Arc::clone(&hosted));
-        (hosted, outcome)
+        (hosted, creator, outcome)
     }
 }
 

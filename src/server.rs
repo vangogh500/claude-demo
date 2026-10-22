@@ -65,8 +65,8 @@ async fn run_socket(mut socket: WebSocket, registry: Arc<Registry>) {
 fn handle(registry: &Registry, binding: &mut Binding, command: Command) -> Vec<String> {
     let result = match (&*binding, command) {
         (None, Command::CreateRoom { name }) => {
-            let (room, outcome) = registry.create_room(name);
-            bind(binding, room, &outcome);
+            let (room, me, outcome) = registry.create_room(name);
+            *binding = Some((room, me));
             Ok(outcome)
         }
         // Joining is not modelled yet: the socket gets no reply and stays unbound.
@@ -77,11 +77,5 @@ fn handle(registry: &Registry, binding: &mut Binding, command: Command) -> Vec<S
     match result {
         Ok(outcome) => outcome.reply.iter().map(protocol::encode_event).collect(),
         Err(code) => vec![protocol::encode_error(code)],
-    }
-}
-
-fn bind(binding: &mut Binding, room: Arc<HostedRoom>, outcome: &Outcome) {
-    if let Some(me) = outcome.admitted {
-        *binding = Some((room, me));
     }
 }

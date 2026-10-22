@@ -82,19 +82,17 @@ impl Room {
     ///
     /// `create_room` from a Newcomer admits it as Participant 1 and Facilitator; the
     /// caller applies it once, to a Room fresh from [`Room::new`]. `create_room` or
-    /// `join_room` from a Participant is refused with `already_in_room`, and any
-    /// other command from a Newcomer with `not_in_room`. Joining and every Item and
-    /// Vote command are not modelled yet: they are accepted with an empty
-    /// [`Outcome`] and leave the Room unchanged.
+    /// `join_room` from a Participant is refused with `already_in_room`. Every other
+    /// command is not modelled yet: it is accepted with an empty [`Outcome`] and
+    /// leaves the Room unchanged. Which commands a Newcomer may send at all is the
+    /// socket layer's first-message rule, not the Room's.
     pub fn apply(&mut self, actor: Actor, command: Command) -> Result<Outcome, ErrorCode> {
         match (actor, command) {
             (Actor::Newcomer, Command::CreateRoom { name }) => Ok(self.create(name)),
-            (Actor::Newcomer, Command::JoinRoom { .. }) => Ok(Outcome::default()),
-            (Actor::Newcomer, _) => Err(ErrorCode::NotInRoom),
             (Actor::Participant(_), Command::CreateRoom { .. } | Command::JoinRoom { .. }) => {
                 Err(ErrorCode::AlreadyInRoom)
             }
-            (Actor::Participant(_), _) => Ok(Outcome::default()),
+            _ => Ok(Outcome::default()),
         }
     }
 
@@ -199,26 +197,5 @@ mod tests {
         );
 
         assert_eq!(refused, Err(ErrorCode::AlreadyInRoom));
-    }
-
-    #[test]
-    fn a_newcomer_must_create_or_join_before_anything_else() {
-        let mut room = Room::new("ABCD".to_string());
-        room.apply(
-            Actor::Newcomer,
-            Command::CreateRoom {
-                name: "Ada".to_string(),
-            },
-        )
-        .unwrap();
-
-        let refused = room.apply(
-            Actor::Newcomer,
-            Command::AddItem {
-                title: "Login".to_string(),
-            },
-        );
-
-        assert_eq!(refused, Err(ErrorCode::NotInRoom));
     }
 }

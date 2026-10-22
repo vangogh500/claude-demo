@@ -34,15 +34,17 @@ async fn start_server(args: &[&str], env_bind: Option<&str>) -> Server {
         command.env("BIND", bind);
     }
     let mut child = command.spawn().expect("server binary starts");
-    let stdout = child.stdout.take().expect("stdout is piped");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
     let mut line = String::new();
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        BufReader::new(stdout).read_line(&mut line),
-    )
-    .await
-    .expect("server reports its address in time")
-    .expect("stdout is readable");
+    tokio::time::timeout(Duration::from_secs(10), stdout.read_line(&mut line))
+        .await
+        .expect("server reports its address in time")
+        .expect("stdout is readable");
+    // Keep the pipe open and drained, so later server output neither fails nor blocks.
+    tokio::spawn(async move {
+        let mut lines = stdout.lines();
+        while let Ok(Some(_)) = lines.next_line().await {}
+    });
     let addr = line
         .trim()
         .strip_prefix("listening on ")
