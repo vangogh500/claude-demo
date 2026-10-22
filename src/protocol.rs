@@ -64,6 +64,13 @@ enum WireEvent<'a> {
         item_id: ItemId,
         title: &'a str,
     },
+    VotesCleared {
+        item_id: ItemId,
+    },
+    ItemEstimated {
+        item_id: ItemId,
+        result: &'a str,
+    },
     Error {
         code: &'static str,
     },
@@ -155,6 +162,11 @@ pub fn encode_event(event: &Event) -> String {
                 .map(|(id, v)| (id.to_string(), v.as_str()))
                 .collect(),
         },
+        Event::VotesCleared { item_id } => WireEvent::VotesCleared { item_id: *item_id },
+        Event::ItemEstimated { item_id, result } => WireEvent::ItemEstimated {
+            item_id: *item_id,
+            result,
+        },
         Event::ItemAdded { item_id, title } => WireEvent::ItemAdded {
             item_id: *item_id,
             title,
@@ -173,6 +185,7 @@ pub fn encode_error(code: ErrorCode) -> String {
         ErrorCode::ItemAlreadyEstimated => "item_already_estimated",
         ErrorCode::NoActiveItem => "no_active_item",
         ErrorCode::ItemNotVoting => "item_not_voting",
+        ErrorCode::ItemNotRevealed => "item_not_revealed",
         ErrorCode::InvalidValue => "invalid_value",
         ErrorCode::NoVotes => "no_votes",
     };
@@ -193,8 +206,6 @@ mod tests {
     use crate::room::{Participant, Snapshot};
     use serde_json::{Value, json};
 
-    // No socket can reach an Estimated Item until `accept` is modelled, so the wire
-    // shape of every Item state is pinned here, at the encoder, until it is.
     #[test]
     fn a_snapshot_with_items_encodes_state_strings_result_and_active_item_id() {
         let snapshot = Snapshot {

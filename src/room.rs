@@ -74,6 +74,13 @@ pub enum Event {
         /// built from it carries no order.
         votes: Vec<(ParticipantId, String)>,
     },
+    VotesCleared {
+        item_id: ItemId,
+    },
+    ItemEstimated {
+        item_id: ItemId,
+        result: String,
+    },
 }
 
 /// The fixed Scale a Vote may take.
@@ -124,6 +131,7 @@ pub enum ErrorCode {
     ItemAlreadyEstimated,
     NoActiveItem,
     ItemNotVoting,
+    ItemNotRevealed,
     InvalidValue,
     NoVotes,
 }
@@ -188,9 +196,12 @@ impl Room {
     /// Scale (`invalid_value`), no Active Item (`no_active_item`) and a Revealed Item
     /// (`item_not_voting`). `reveal` (Facilitator) makes the Voting Active Item Revealed and
     /// broadcasts `votes_revealed`; it refuses no Active Item (`no_active_item`), an Item
-    /// already Revealed (`item_not_voting`) and an Item with no Votes (`no_votes`). Every
-    /// other command is not modelled yet: it is accepted with an empty [`Outcome`] and leaves
-    /// the Room unchanged. Which commands a Newcomer may send at all is the socket layer's
+    /// already Revealed (`item_not_voting`) and an Item with no Votes (`no_votes`). `revote`
+    /// (Facilitator) clears the Votes, returns the Revealed Active Item to Voting and
+    /// broadcasts `votes_cleared`. `accept` (Facilitator) records a Scale value (`invalid_value`
+    /// otherwise; it need not match any Vote) as the Revealed Active Item's Result, makes it
+    /// Estimated, leaves no Active Item and broadcasts `item_estimated`. Both refuse no Active
+    /// Item (`no_active_item`) and an Item not Revealed (`item_not_revealed`). Which commands a Newcomer may send at all is the socket layer's
     /// first-message rule, not the Room's.
     pub fn apply(&mut self, actor: Actor, command: Command) -> Result<Outcome, ErrorCode> {
         match (actor, command) {
@@ -202,7 +213,11 @@ impl Room {
             }
             (
                 Actor::Participant(me),
-                Command::AddItem { .. } | Command::ActivateItem { .. } | Command::Reveal,
+                Command::AddItem { .. }
+                | Command::ActivateItem { .. }
+                | Command::Reveal
+                | Command::Revote
+                | Command::Accept { .. },
             ) if me != self.facilitator_id => Err(ErrorCode::NotFacilitator),
             (Actor::Participant(_), Command::AddItem { title }) => Ok(self.add_item(title)),
             (Actor::Participant(_), Command::ActivateItem { item_id }) => {
@@ -210,8 +225,48 @@ impl Room {
             }
             (Actor::Participant(me), Command::Vote { value }) => self.vote(me, value),
             (Actor::Participant(_), Command::Reveal) => self.reveal(),
-            _ => Ok(Outcome::default()),
+            (Actor::Participant(_), Command::Revote) => self.revote(),
+            (Actor::Participant(_), Command::Accept { value }) => self.accept(value),
+            (Actor::Newcomer, _) => Ok(Outcome::default()),
         }
+    }
+
+    fn revealed_item_mut(&mut self) -> Result<&mut ItemView, ErrorCode> {
+        let item = self.active_item_mut().ok_or(ErrorCode::NoActiveItem)?;
+        if item.state != ItemState::Revealed {
+            return Err(ErrorCode::ItemNotRevealed);
+        }
+        Ok(item)
+    }
+
+    fn revote(&mut self) -> Result<Outcome, ErrorCode> {
+        let item = self.revealed_item_mut()?;
+        item.state = ItemState::Voting;
+        let item_id = item.id;
+        self.votes.clear();
+        Ok(Outcome {
+            broadcast: vec![Event::VotesCleared { item_id }],
+            ..Outcome::default()
+        })
+    }
+
+    fn accept(&mut self, value: String) -> Result<Outcome, ErrorCode> {
+        if !SCALE.contains(&value.as_str()) {
+            return Err(ErrorCode::InvalidValue);
+        }
+        let item = self.revealed_item_mut()?;
+        item.state = ItemState::Estimated;
+        item.result = Some(value.clone());
+        let item_id = item.id;
+        self.active_item_id = None;
+        self.votes.clear();
+        Ok(Outcome {
+            broadcast: vec![Event::ItemEstimated {
+                item_id,
+                result: value,
+            }],
+            ..Outcome::default()
+        })
     }
 
     fn active_item_mut(&mut self) -> Option<&mut ItemView> {
@@ -745,6 +800,154 @@ mod tests {
                 votes: vec![(2, "8".to_string()), (3, "3".to_string())]
             }]
         );
+    }
+
+    fn revote(room: &mut Room, me: ParticipantId) -> Result<Outcome, ErrorCode> {
+        room.apply(Actor::Participant(me), Command::Revote)
+    }
+
+    fn accept(room: &mut Room, me: ParticipantId, value: &str) -> Result<Outcome, ErrorCode> {
+        room.apply(
+            Actor::Participant(me),
+            Command::Accept {
+                value: value.to_string(),
+            },
+        )
+    }
+
+    fn revealed_room() -> Room {
+        let mut room = voting_room();
+        join(&mut room, "Bob");
+        vote(&mut room, 1, "5").unwrap();
+        vote(&mut room, 2, "8").unwrap();
+        reveal(&mut room, 1).unwrap();
+        room
+    }
+
+    #[test]
+    fn revote_clears_every_vote_and_returns_the_item_to_voting() {
+        let mut room = revealed_room();
+
+        let outcome = revote(&mut room, 1).unwrap();
+
+        assert_eq!(outcome.broadcast, vec![Event::VotesCleared { item_id: 1 }]);
+        let snapshot = room.snapshot_for(1);
+        assert_eq!(
+            snapshot.items,
+            vec![item_view(1, "Login page", ItemState::Voting)]
+        );
+        assert_eq!(snapshot.active_item_id, Some(1));
+        assert!(snapshot.voted.is_empty());
+        // Voting is open again.
+        assert!(vote(&mut room, 2, "3").is_ok());
+    }
+
+    #[test]
+    fn accept_records_the_result_and_leaves_no_active_item() {
+        let mut room = revealed_room();
+
+        let outcome = accept(&mut room, 1, "5").unwrap();
+
+        assert_eq!(
+            outcome.broadcast,
+            vec![Event::ItemEstimated {
+                item_id: 1,
+                result: "5".to_string()
+            }]
+        );
+        let snapshot = room.snapshot_for(1);
+        assert_eq!(snapshot.active_item_id, None);
+        assert!(snapshot.voted.is_empty());
+        assert_eq!(
+            snapshot.items,
+            vec![ItemView {
+                result: Some("5".to_string()),
+                ..item_view(1, "Login page", ItemState::Estimated)
+            }]
+        );
+    }
+
+    #[test]
+    fn accept_takes_a_scale_value_no_participant_voted() {
+        let mut room = revealed_room();
+
+        assert!(accept(&mut room, 1, "13").is_ok());
+        assert_eq!(room.snapshot_for(1).items[0].result.as_deref(), Some("13"));
+    }
+
+    #[test]
+    fn a_late_joiner_sees_each_estimated_items_result() {
+        let mut room = revealed_room();
+        accept(&mut room, 1, "5").unwrap();
+        add(&mut room, "Logout page").unwrap();
+
+        let joined = join(&mut room, "Cy");
+
+        let Event::RoomSnapshot(snapshot) = &joined.reply[0] else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.items[0].state, ItemState::Estimated);
+        assert_eq!(snapshot.items[0].result.as_deref(), Some("5"));
+        assert_eq!(snapshot.items[1].result, None);
+    }
+
+    #[test]
+    fn revote_and_accept_refuse_an_item_that_is_not_revealed() {
+        let mut room = voting_room();
+        vote(&mut room, 1, "5").unwrap();
+
+        assert_eq!(
+            revote(&mut room, 1).unwrap_err(),
+            ErrorCode::ItemNotRevealed
+        );
+        assert_eq!(
+            accept(&mut room, 1, "5").unwrap_err(),
+            ErrorCode::ItemNotRevealed
+        );
+        // Refusals changed nothing.
+        assert_eq!(room.snapshot_for(1).voted, vec![1]);
+    }
+
+    #[test]
+    fn revote_and_accept_with_no_active_item_are_refused() {
+        let mut room = room_with_facilitator();
+        add(&mut room, "Login page").unwrap();
+
+        assert_eq!(revote(&mut room, 1).unwrap_err(), ErrorCode::NoActiveItem);
+        assert_eq!(
+            accept(&mut room, 1, "5").unwrap_err(),
+            ErrorCode::NoActiveItem
+        );
+    }
+
+    #[test]
+    fn accept_off_the_scale_is_invalid_value_and_the_item_stays_revealed() {
+        let mut room = revealed_room();
+
+        for value in ["4", "", "05", "?!"] {
+            assert_eq!(
+                accept(&mut room, 1, value).unwrap_err(),
+                ErrorCode::InvalidValue,
+                "{value}"
+            );
+        }
+        assert_eq!(
+            room.snapshot_for(1).items,
+            vec![item_view(1, "Login page", ItemState::Revealed)]
+        );
+        assert!(accept(&mut room, 1, "?").is_ok());
+    }
+
+    #[test]
+    fn a_voter_cannot_revote_or_accept() {
+        let mut room = revealed_room();
+
+        assert_eq!(revote(&mut room, 2).unwrap_err(), ErrorCode::NotFacilitator);
+        assert_eq!(
+            accept(&mut room, 2, "5").unwrap_err(),
+            ErrorCode::NotFacilitator
+        );
+        assert_eq!(room.snapshot_for(1).voted, vec![1, 2]);
     }
 
     #[test]

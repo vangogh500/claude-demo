@@ -506,3 +506,86 @@ async fn votes_are_hidden_until_the_facilitator_reveals_them() {
     assert_next(&mut ada, expected.clone()).await;
     assert_next(&mut bob, expected).await;
 }
+
+#[tokio::test]
+async fn a_whole_session_runs_end_to_end_through_revote_and_accept() {
+    let server = ephemeral_server().await;
+    let (mut ada, _, code) = create(&server, "Ada").await;
+    let (mut bob, _) = join(&server, &code, "Bob").await;
+    let joined = json!({"type": "participant_joined", "participant_id": 2, "name": "Bob"});
+    assert_next(&mut ada, joined.clone()).await;
+    assert_next(&mut bob, joined).await;
+
+    // Both clients see every event of every transition, the acting one included.
+    for (command, event) in [
+        (
+            json!({"type": "add_item", "title": "Login page"}),
+            json!({"type": "item_added", "item_id": 1, "title": "Login page"}),
+        ),
+        (
+            json!({"type": "activate_item", "item_id": 1}),
+            json!({"type": "item_activated", "item_id": 1}),
+        ),
+    ] {
+        send(&mut ada, command).await;
+        assert_next(&mut ada, event.clone()).await;
+        assert_next(&mut bob, event).await;
+    }
+    send(&mut ada, json!({"type": "vote", "value": "5"})).await;
+    let cast = json!({"type": "vote_cast", "participant_id": 1});
+    assert_next(&mut ada, cast.clone()).await;
+    assert_next(&mut bob, cast).await;
+    send(&mut bob, json!({"type": "vote", "value": "8"})).await;
+    let cast = json!({"type": "vote_cast", "participant_id": 2});
+    assert_next(&mut ada, cast.clone()).await;
+    assert_next(&mut bob, cast).await;
+    send(&mut ada, json!({"type": "reveal"})).await;
+    let revealed = json!({"type": "votes_revealed", "item_id": 1, "votes": {"1": "5", "2": "8"}});
+    assert_next(&mut ada, revealed.clone()).await;
+    assert_next(&mut bob, revealed).await;
+
+    // Refusals reach the sender only.
+    send(&mut bob, json!({"type": "accept", "value": "5"})).await;
+    assert_next(
+        &mut bob,
+        json!({"type": "error", "code": "not_facilitator"}),
+    )
+    .await;
+    send(&mut ada, json!({"type": "accept", "value": "4"})).await;
+    assert_next(&mut ada, json!({"type": "error", "code": "invalid_value"})).await;
+
+    // Re-vote clears the Votes and reopens voting.
+    send(&mut ada, json!({"type": "revote"})).await;
+    let cleared = json!({"type": "votes_cleared", "item_id": 1});
+    assert_next(&mut ada, cleared.clone()).await;
+    assert_next(&mut bob, cleared).await;
+    send(&mut ada, json!({"type": "revote"})).await;
+    assert_next(
+        &mut ada,
+        json!({"type": "error", "code": "item_not_revealed"}),
+    )
+    .await;
+    send(&mut bob, json!({"type": "vote", "value": "5"})).await;
+    let cast = json!({"type": "vote_cast", "participant_id": 2});
+    assert_next(&mut bob, cast.clone()).await;
+    assert_next(&mut ada, cast).await;
+    send(&mut ada, json!({"type": "reveal"})).await;
+    let revealed = json!({"type": "votes_revealed", "item_id": 1, "votes": {"2": "5"}});
+    assert_next(&mut ada, revealed.clone()).await;
+    assert_next(&mut bob, revealed).await;
+
+    // Accept a value nobody voted.
+    send(&mut ada, json!({"type": "accept", "value": "13"})).await;
+    let estimated = json!({"type": "item_estimated", "item_id": 1, "result": "13"});
+    assert_next(&mut ada, estimated.clone()).await;
+    assert_next(&mut bob, estimated).await;
+
+    // A late joiner sees the Result and no Active Item.
+    let (_cy, snapshot) = join(&server, &code, "Cy").await;
+    assert_eq!(
+        snapshot["items"],
+        json!([{"id": 1, "title": "Login page", "state": "Estimated", "result": "13"}])
+    );
+    assert_eq!(snapshot["active_item_id"], Value::Null);
+    assert_eq!(snapshot["voted"], json!([]));
+}
