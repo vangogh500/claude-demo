@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::room::{Command, ErrorCode, Event, ItemId, ParticipantId};
+use crate::room::{Command, ErrorCode, Event, ItemId, ItemState, ItemView, ParticipantId};
 
 /// A frame that is not JSON, has no known `type`, or lacks a field its `type` needs.
 #[derive(Debug, PartialEq)]
@@ -32,15 +32,45 @@ enum WireEvent<'a> {
         you: ParticipantId,
         facilitator_id: ParticipantId,
         participants: Vec<WireParticipant<'a>>,
-        // Items, the Active Item and Votes are not modelled yet, so a snapshot
-        // always carries them empty.
-        items: [(); 0],
+        items: Vec<WireItem<'a>>,
         active_item_id: Option<ItemId>,
+        // Votes are not modelled yet, so a snapshot always carries none.
         voted: [ParticipantId; 0],
+    },
+    ItemActivated {
+        item_id: ItemId,
+    },
+    ItemAdded {
+        item_id: ItemId,
+        title: &'a str,
     },
     Error {
         code: &'static str,
     },
+}
+
+#[derive(Serialize)]
+struct WireItem<'a> {
+    id: ItemId,
+    title: &'a str,
+    state: &'static str,
+    result: Option<&'a str>,
+}
+
+impl<'a> From<&'a ItemView> for WireItem<'a> {
+    fn from(item: &'a ItemView) -> Self {
+        WireItem {
+            id: item.id,
+            title: &item.title,
+            state: match item.state {
+                ItemState::Pending => "Pending",
+                ItemState::Voting => "Voting",
+                ItemState::Revealed => "Revealed",
+                ItemState::Estimated => "Estimated",
+            },
+            result: item.result.as_deref(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -77,9 +107,14 @@ pub fn encode_event(event: &Event) -> String {
                     name: &p.name,
                 })
                 .collect(),
-            items: [],
-            active_item_id: None,
+            items: snapshot.items.iter().map(WireItem::from).collect(),
+            active_item_id: snapshot.active_item_id,
             voted: [],
+        },
+        Event::ItemActivated { item_id } => WireEvent::ItemActivated { item_id: *item_id },
+        Event::ItemAdded { item_id, title } => WireEvent::ItemAdded {
+            item_id: *item_id,
+            title,
         },
     };
     to_frame(&wire)
@@ -89,6 +124,9 @@ pub fn encode_error(code: ErrorCode) -> String {
     let code = match code {
         ErrorCode::NotInRoom => "not_in_room",
         ErrorCode::AlreadyInRoom => "already_in_room",
+        ErrorCode::NotFacilitator => "not_facilitator",
+        ErrorCode::UnknownItem => "unknown_item",
+        ErrorCode::ItemAlreadyEstimated => "item_already_estimated",
     };
     to_frame(&WireEvent::Error { code })
 }

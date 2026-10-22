@@ -204,3 +204,27 @@ async fn malformed_frames_are_refused_and_the_socket_stays_open() {
     send(&mut ada, json!({"type": "create_room", "name": "Ada"})).await;
     assert_eq!(receive(&mut ada).await["type"], "room_snapshot");
 }
+
+#[tokio::test]
+async fn the_facilitator_adds_and_activates_items_and_hears_the_events() {
+    let server = ephemeral_server().await;
+    let mut ada = connect(&server).await;
+    send(&mut ada, json!({"type": "create_room", "name": "Ada"})).await;
+    receive(&mut ada).await;
+
+    send(&mut ada, json!({"type": "add_item", "title": "Login page"})).await;
+    assert_eq!(
+        receive(&mut ada).await,
+        json!({"type": "item_added", "item_id": 1, "title": "Login page"})
+    );
+    send(&mut ada, json!({"type": "activate_item", "item_id": 1})).await;
+    assert_eq!(
+        receive(&mut ada).await,
+        json!({"type": "item_activated", "item_id": 1})
+    );
+    send(&mut ada, json!({"type": "activate_item", "item_id": 7})).await;
+    assert_eq!(
+        receive(&mut ada).await,
+        json!({"type": "error", "code": "unknown_item"})
+    );
+}

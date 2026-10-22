@@ -75,7 +75,14 @@ fn handle(registry: &Registry, binding: &mut Binding, command: Command) -> Vec<S
         (Some((room, me)), command) => room.apply(Actor::Participant(*me), command),
     };
     match result {
-        Ok(outcome) => outcome.reply.iter().map(protocol::encode_event).collect(),
+        // Fan-out to the Room's other sockets is not modelled yet: a broadcast event
+        // reaches only the sender, after its reply.
+        Ok(outcome) => outcome
+            .reply
+            .iter()
+            .chain(&outcome.broadcast)
+            .map(protocol::encode_event)
+            .collect(),
         Err(code) => vec![protocol::encode_error(code)],
     }
 }
