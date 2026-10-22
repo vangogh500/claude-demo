@@ -201,8 +201,8 @@ impl Room {
     /// broadcasts `votes_cleared`. `accept` (Facilitator) records a Scale value (`invalid_value`
     /// otherwise; it need not match any Vote) as the Revealed Active Item's Result, makes it
     /// Estimated, leaves no Active Item and broadcasts `item_estimated`. Both refuse no Active
-    /// Item (`no_active_item`) and an Item not Revealed (`item_not_revealed`). Which commands a
-    /// Newcomer may send at all is the socket layer's first-message rule, not the Room's.
+    /// Item (`no_active_item`) and an Item not Revealed (`item_not_revealed`). A Newcomer is
+    /// refused every command but `create_room` and `join_room` with `not_in_room`.
     pub fn apply(&mut self, actor: Actor, command: Command) -> Result<Outcome, ErrorCode> {
         match (actor, command) {
             (Actor::Newcomer, Command::CreateRoom { name }) => Ok(self.create(name)),
@@ -227,7 +227,7 @@ impl Room {
             (Actor::Participant(_), Command::Reveal) => self.reveal(),
             (Actor::Participant(_), Command::Revote) => self.revote(),
             (Actor::Participant(_), Command::Accept { value }) => self.accept(value),
-            (Actor::Newcomer, _) => Ok(Outcome::default()),
+            (Actor::Newcomer, _) => Err(ErrorCode::NotInRoom),
         }
     }
 
@@ -1215,6 +1215,42 @@ mod tests {
         );
 
         assert_eq!(refused, Err(ErrorCode::AlreadyInRoom));
+    }
+
+    #[test]
+    fn a_newcomer_is_refused_every_command_but_create_and_join_and_nothing_changes() {
+        let mut room = voting_room();
+        let commands = [
+            Command::AddItem {
+                title: "Nope".to_string(),
+            },
+            Command::ActivateItem { item_id: 1 },
+            Command::Vote {
+                value: "5".to_string(),
+            },
+            Command::Reveal,
+            Command::Revote,
+            Command::Accept {
+                value: "5".to_string(),
+            },
+            Command::Leave,
+        ];
+
+        for command in commands {
+            let label = format!("{command:?}");
+            assert_eq!(
+                room.apply(Actor::Newcomer, command),
+                Err(ErrorCode::NotInRoom),
+                "{label}"
+            );
+        }
+        let snapshot = room.snapshot_for(1);
+        assert_eq!(snapshot.participants, vec![participant(1, "Ada")]);
+        assert_eq!(
+            snapshot.items,
+            vec![item_view(1, "Login page", ItemState::Voting)]
+        );
+        assert!(snapshot.voted.is_empty());
     }
 
     #[test]
