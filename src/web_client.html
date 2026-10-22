@@ -23,10 +23,10 @@
 // The single state object. The view is rendered from it alone; no element holds
 // state of its own. Later tickets extend this state and the render function.
 const state = {
-  screen: "entry",       // "entry" | "room" | "disconnected"
+  screen: "entry",       // "entry" | "room"
+  connecting: false,     // a connection attempt is in flight
   name: "",
   joinCode: location.hash.slice(1),
-  focus: null,           // id of the input to keep focus on across renders
   message: null,         // a dismissable notice or error
   room: null,            // built from room_snapshot, updated by events
 };
@@ -34,13 +34,21 @@ const state = {
 let socket = null;
 
 function connect(firstCommand) {
+  if (socket !== null) { const old = socket; socket = null; old.close(); }
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-  socket = new WebSocket(scheme + "//" + location.host + "/ws");
-  socket.onopen = () => socket.send(JSON.stringify(firstCommand));
-  socket.onmessage = (e) => { apply(JSON.parse(e.data)); render(); };
-  socket.onclose = () => {
-    if (socket !== null) { state.screen = "disconnected"; socket = null; render(); }
+  const mine = new WebSocket(scheme + "//" + location.host + "/ws");
+  socket = mine;
+  state.connecting = true;
+  mine.onopen = () => mine.send(JSON.stringify(firstCommand));
+  mine.onmessage = (e) => { if (socket === mine) { apply(JSON.parse(e.data)); render(); } };
+  mine.onclose = () => {
+    if (socket !== mine) return;
+    socket = null;
+    state.connecting = false;
+    state.message = "connection_closed";
+    render();
   };
+  render();
 }
 
 function normalizedCode() { return state.joinCode.trim().toUpperCase(); }
@@ -67,11 +75,14 @@ function apply(ev) {
         voted: new Set(ev.voted),
       };
       state.screen = "room";
+      state.connecting = false;
       state.joinCode = ev.join_code;
       state.message = null;
       break;
     case "participant_joined":
-      room.participants.push({ id: ev.participant_id, name: ev.name });
+      if (!room.participants.some((p) => p.id === ev.participant_id)) {
+        room.participants.push({ id: ev.participant_id, name: ev.name });
+      }
       break;
     case "participant_left":
       room.participants = room.participants.filter((p) => p.id !== ev.participant_id);
@@ -81,7 +92,7 @@ function apply(ev) {
       room.facilitatorId = ev.participant_id;
       break;
     case "error":
-      if (state.room === null) { state.screen = "entry"; }
+      state.connecting = false;
       state.message = ev.code;
       break;
   }
@@ -100,17 +111,26 @@ function shareLink() {
   return location.origin + location.pathname + "#" + state.room.joinCode;
 }
 
+// The entry screen's elements are created once and kept across renders, so
+// editing is never disturbed; render only sets value/disabled from state.
+const entry = (() => {
+  const name = h("input", { id: "name", oninput: (e) => { state.name = e.target.value; render(); } });
+  const code = h("input", { id: "code", oninput: (e) => { state.joinCode = e.target.value; render(); } });
+  const create = h("button", { onclick: createRoom }, "Create Room");
+  const join = h("button", { onclick: joinRoom }, "Join");
+  return { name, code, create, join };
+})();
+
+const entryView = h("div", {}, h("h1", {}, "Story Pointing"),
+  h("label", { htmlFor: "name" }, "Display name"), entry.name, entry.create,
+  h("label", { htmlFor: "code" }, "Join Code"), entry.code, entry.join);
+
 function renderEntry() {
-  const nameEmpty = state.name.trim() === "";
-  return [
-    h("h1", {}, "Story Pointing"),
-    h("label", { htmlFor: "name" }, "Display name"),
-    h("input", { id: "name", value: state.name, oninput: (e) => { state.name = e.target.value; state.focus = "name"; render(); } }),
-    h("button", { disabled: nameEmpty, onclick: createRoom }, "Create Room"),
-    h("label", { htmlFor: "code" }, "Join Code"),
-    h("input", { id: "code", value: state.joinCode, oninput: (e) => { state.joinCode = e.target.value; state.focus = "code"; render(); } }),
-    h("button", { disabled: nameEmpty, onclick: joinRoom }, "Join"),
-  ];
+  const blocked = state.name.trim() === "" || state.connecting;
+  if (entry.name.value !== state.name) entry.name.value = state.name;
+  if (entry.code.value !== state.joinCode) entry.code.value = state.joinCode;
+  entry.create.disabled = blocked;
+  entry.join.disabled = blocked;
 }
 
 function renderRoom() {
@@ -131,28 +151,18 @@ function renderRoom() {
   ];
 }
 
-function renderDisconnected() {
-  return [
-    h("h1", {}, "Disconnected"),
-    h("p", {}, "You are no longer in the Room. Rejoining makes you a new Participant and drops your Vote."),
-    h("button", { onclick: () => { state.screen = "entry"; state.room = null; render(); } }, "Rejoin"),
-  ];
-}
+const messageBox = h("div", {});
+const roomBox = h("div", {});
+document.getElementById("app").append(messageBox, entryView, roomBox);
 
 function render() {
-  const app = document.getElementById("app");
-  const views = { entry: renderEntry, room: renderRoom, disconnected: renderDisconnected };
-  const children = [];
-  if (state.message !== null) {
-    children.push(h("div", { className: "error" }, state.message,
-      h("button", { onclick: () => { state.message = null; render(); } }, "Dismiss")));
-  }
-  children.push(...views[state.screen]());
-  app.replaceChildren(...children);
-  if (state.focus !== null) {
-    const el = document.getElementById(state.focus);
-    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-  }
+  messageBox.replaceChildren(...(state.message === null ? [] : [
+    h("div", { className: "error" }, state.message,
+      h("button", { onclick: () => { state.message = null; render(); } }, "Dismiss"))]));
+  entryView.hidden = state.screen !== "entry";
+  roomBox.hidden = state.screen !== "room";
+  if (state.screen === "entry") renderEntry();
+  else roomBox.replaceChildren(...renderRoom());
 }
 
 render();
