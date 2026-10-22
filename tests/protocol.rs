@@ -372,7 +372,10 @@ async fn a_pipelined_error_arrives_after_the_frames_of_earlier_commands() {
     let server = ephemeral_server().await;
     let (_ada, _, code) = create(&server, "Ada").await;
 
-    // Several joiners, so an ordering the server leaves to chance shows up.
+    // Several joiners, so an ordering the server leaves to chance shows up. Each
+    // stays connected until the end: a joiner leaving mid-loop would put a
+    // participant_left, at an uncontrolled moment, into the next one's frames.
+    let mut joiners = Vec::new();
     for _ in 0..10 {
         let mut bob = connect(&server).await;
         // Both frames in one write, with no receive between them: the refusal of
@@ -390,6 +393,7 @@ async fn a_pipelined_error_arrives_after_the_frames_of_earlier_commands() {
             json!({"type": "error", "code": "not_facilitator"}),
         )
         .await;
+        joiners.push(bob);
     }
 }
 
