@@ -14,6 +14,9 @@
   .error { background: #fdd; padding: 0.5rem; margin: 0.5rem 0; }
   .active { font-weight: bold; background: #ffd; }
   ul, ol { padding-left: 1.25rem; }
+  .notice { background: #def; padding: 0.5rem; margin: 0.5rem 0; }
+  .scale { display: flex; flex-wrap: wrap; }
+  button { min-height: 2.75rem; }
   .scale button { min-width: 4.5rem; min-height: 4.5rem; font-size: 1.5rem; }
   .scale button.picked { background: #26a; color: #fff; font-weight: bold; }
 </style>
@@ -26,17 +29,56 @@
 // The single state object. The view is rendered from it alone; no element holds
 // state of its own. Later tickets extend this state and the render function.
 const state = {
-  screen: "entry",       // "entry" | "room"
+  screen: "entry",       // "entry" | "room" | "disconnected"
   connecting: false,     // a connection attempt is in flight
   name: "",
   joinCode: location.hash.slice(1),
-  message: null,         // a dismissable notice or error
+  message: null,         // a dismissable error code, shown as a sentence
+  notice: null,          // a dismissable notice, already a sentence
   newTitle: "",          // the Facilitator's add-Item input
   room: null,            // built from room_snapshot, updated by events
 };
 
 // The Scale, in order (GLOSSARY.md); keep in sync with SCALE in src/room.rs.
 const SCALE = ["0", "1", "2", "3", "5", "8", "13", "20", "40", "100", "?"];
+
+// One sentence per server error code; an unrecognised code is shown raw.
+const ERRORS = {
+  malformed: "The server could not understand that request.",
+  not_in_room: "You are not in a Room.",
+  already_in_room: "You are already in a Room.",
+  unknown_join_code: "No live Room has that Join Code. Check the code and try again.",
+  not_facilitator: "Only the Facilitator can do that.",
+  unknown_item: "That Item no longer exists.",
+  no_active_item: "There is no Active Item.",
+  item_not_voting: "The Active Item is not open for Voting.",
+  item_not_revealed: "The Votes have not been revealed yet.",
+  item_already_estimated: "That Item has already been Estimated.",
+  invalid_value: "That value is not on the Scale.",
+  no_votes: "Nobody has voted yet, so there is nothing to Reveal.",
+  connection_closed: "Could not connect to the server.",
+};
+
+function errorText(code) { return ERRORS[code] || code; }
+
+function isFacilitator() { return state.room.facilitatorId === state.room.you; }
+
+function activeItem() {
+  const room = state.room;
+  return room.items.find((item) => item.id === room.activeItemId);
+}
+
+function setItemState(room, itemId, itemState) {
+  const item = room.items.find((i) => i.id === itemId);
+  if (item) item.state = itemState;
+  return item;
+}
+
+function resetRound(room) {
+  room.voted = new Set();
+  room.votes = null;
+  room.myVote = null;
+}
 
 let socket = null;
 
@@ -52,7 +94,8 @@ function connect(firstCommand) {
     if (socket !== mine) return;
     socket = null;
     state.connecting = false;
-    state.message = "connection_closed";
+    if (state.screen === "room") state.screen = "disconnected";
+    else if (state.message === null) state.message = "connection_closed";
     render();
   };
   render();
@@ -87,6 +130,7 @@ function apply(ev) {
       state.connecting = false;
       state.joinCode = ev.join_code;
       state.message = null;
+      state.notice = null;
       break;
     case "participant_joined":
       if (!room.participants.some((p) => p.id === ev.participant_id)) {
@@ -100,41 +144,32 @@ function apply(ev) {
       break;
     case "facilitator_changed":
       room.facilitatorId = ev.participant_id;
+      if (ev.participant_id === room.you) state.notice = "You are now the Facilitator.";
       break;
     case "item_added":
       room.items.push({ id: ev.item_id, title: ev.title, state: "Pending", result: null });
       break;
     case "item_activated":
-      for (const item of room.items) {
-        if (item.id === room.activeItemId && item.state !== "Estimated") item.state = "Pending";
-        if (item.id === ev.item_id) item.state = "Voting";
-      }
+      { const old = activeItem(); if (old && old.state !== "Estimated") old.state = "Pending"; }
+      setItemState(room, ev.item_id, "Voting");
       room.activeItemId = ev.item_id;
-      room.voted = new Set();
-      room.votes = null;
-      room.myVote = null;
+      resetRound(room);
       break;
     case "vote_cast":
       room.voted.add(ev.participant_id);
       break;
     case "votes_revealed":
-      for (const item of room.items) if (item.id === ev.item_id) item.state = "Revealed";
+      setItemState(room, ev.item_id, "Revealed");
       room.votes = ev.votes;   // object keyed by participant id as a string
       break;
     case "votes_cleared":
-      for (const item of room.items) if (item.id === ev.item_id) item.state = "Voting";
-      room.voted = new Set();
-      room.votes = null;
-      room.myVote = null;
+      setItemState(room, ev.item_id, "Voting");
+      resetRound(room);
       break;
     case "item_estimated":
-      for (const item of room.items) {
-        if (item.id === ev.item_id) { item.state = "Estimated"; item.result = ev.result; }
-      }
+      { const item = setItemState(room, ev.item_id, "Estimated"); if (item) item.result = ev.result; }
       room.activeItemId = null;
-      room.voted = new Set();
-      room.votes = null;
-      room.myVote = null;
+      resetRound(room);
       break;
     case "error":
       state.connecting = false;
@@ -207,28 +242,23 @@ const backlog = (() => {
 
 function renderBacklog() {
   const room = state.room;
-  backlog.box.hidden = room.facilitatorId !== room.you;
+  backlog.box.hidden = !isFacilitator();
   if (backlog.title.value !== state.newTitle) backlog.title.value = state.newTitle;
   backlog.add.disabled = state.newTitle.trim() === "";
 }
 
 function renderItems() {
   const room = state.room;
-  const isFacilitator = room.facilitatorId === room.you;
+  const facilitator = isFacilitator();
   return h("ol", {}, ...room.items.map((item) => {
     const active = item.id === room.activeItemId;
     const li = h("li", { className: active ? "active" : "" }, item.title,
       h("span", { className: "mark" }, " (" + item.state + (item.result !== null ? ": " + item.result : "") + ")"));
-    if (isFacilitator && item.state === "Pending") {
+    if (facilitator && item.state === "Pending") {
       li.append(h("button", { onclick: () => send({ type: "activate_item", item_id: item.id }) }, "Activate"));
     }
     return li;
   }));
-}
-
-function activeItem() {
-  const room = state.room;
-  return room.items.find((item) => item.id === room.activeItemId);
 }
 
 // Reveal and the revealed Votes. Votes are listed in Scale order, ? last, with
@@ -237,10 +267,10 @@ function activeItem() {
 function renderReveal() {
   const room = state.room;
   const active = activeItem();
-  const isFacilitator = room.facilitatorId === room.you;
+  const facilitator = isFacilitator();
   if (!active) return [];
   if (active.state === "Voting") {
-    if (!isFacilitator) return [];
+    if (!facilitator) return [];
     return [h("button", { onclick: () => send({ type: "reveal" }), disabled: room.voted.size === 0 }, "Reveal")];
   }
   if (active.state !== "Revealed") return [];
@@ -252,7 +282,7 @@ function renderReveal() {
     const rows = Object.entries(room.votes).sort((a, b) => SCALE.indexOf(a[1]) - SCALE.indexOf(b[1]));
     out.push(h("ul", {}, ...rows.map(([id, value]) => h("li", {}, nameOf(id) + ": " + value))));
   }
-  if (isFacilitator) {
+  if (facilitator) {
     out.push(h("button", { onclick: () => send({ type: "revote" }) }, "Re-vote"));
     out.push(h("h2", {}, "Accept a Result"));
     out.push(h("div", { className: "scale" }, ...SCALE.map((value) =>
@@ -264,7 +294,7 @@ function renderReveal() {
 // The Scale is offered only while the Active Item is Voting, to everyone.
 function renderScale() {
   const room = state.room;
-  const active = room.items.find((item) => item.id === room.activeItemId);
+  const active = activeItem();
   if (!active || active.state !== "Voting") return [];
   return [
     h("h2", {}, "Vote"),
@@ -300,18 +330,37 @@ function renderRoom() {
   ];
 }
 
+function rejoin() {
+  state.room = null;
+  state.notice = null;
+  state.screen = "entry";
+  render();
+}
+
+const disconnectedView = h("div", {}, h("h1", {}, "Disconnected"),
+  h("p", {}, "You are no longer in the Room. Rejoining makes you a new Participant and drops your Vote."),
+  h("button", { onclick: rejoin }, "Rejoin"));
+
 const messageBox = h("div", {});
 const roomBox = h("div", {});
 const roomTop = h("div", {});
 roomBox.append(roomTop, backlog.box);
-document.getElementById("web-client").append(messageBox, entryView, roomBox);
+document.getElementById("web-client").append(messageBox, entryView, roomBox, disconnectedView);
 
 function render() {
-  messageBox.replaceChildren(...(state.message === null ? [] : [
-    h("div", { className: "error" }, state.message,
-      h("button", { onclick: () => { state.message = null; render(); } }, "Dismiss"))]));
+  const boxes = [];
+  if (state.notice !== null) {
+    boxes.push(h("div", { className: "notice" }, state.notice,
+      h("button", { onclick: () => { state.notice = null; render(); } }, "Dismiss")));
+  }
+  if (state.message !== null) {
+    boxes.push(h("div", { className: "error" }, errorText(state.message),
+      h("button", { onclick: () => { state.message = null; render(); } }, "Dismiss")));
+  }
+  messageBox.replaceChildren(...boxes);
   entryView.hidden = state.screen !== "entry";
   roomBox.hidden = state.screen !== "room";
+  disconnectedView.hidden = state.screen !== "disconnected";
   if (state.screen === "entry") renderEntry();
   else { roomTop.replaceChildren(...renderRoom()); renderBacklog(); }
 }
