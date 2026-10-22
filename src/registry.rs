@@ -146,15 +146,11 @@ impl Registry {
         hosted.ended = true;
         hosted.outboxes.clear();
         drop(hosted);
-        let mut rooms = self.rooms.lock().expect("registry lock");
-        // Only release the code if it still names this Room: once it is released, a
-        // newer Room may be issued the same code, and that one must stay.
-        if rooms
-            .get(&room.join_code)
-            .is_some_and(|current| Arc::ptr_eq(current, room))
-        {
-            rooms.remove(&room.join_code);
-        }
+        // `ended` flips once, under the Room lock, so this is the code's only removal.
+        self.rooms
+            .lock()
+            .expect("registry lock")
+            .remove(&room.join_code);
     }
 }
 
