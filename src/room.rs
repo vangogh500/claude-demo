@@ -70,7 +70,8 @@ pub enum Event {
     },
     VotesRevealed {
         item_id: ItemId,
-        /// Every Vote as (participant, value), in the order first cast.
+        /// Every Vote as (participant, value), in the order first cast. The wire map
+        /// built from it carries no order.
         votes: Vec<(ParticipantId, String)>,
     },
 }
@@ -169,30 +170,28 @@ impl Room {
 
     /// Applies `command` sent by `actor`.
     ///
-    /// `create_room` from a Newcomer admits it as Participant 1 and Facilitator; the
-    /// caller applies it once, to a Room fresh from [`Room::new`]. `join_room` from a
-    /// Newcomer admits it as a Voter, replying with a snapshot and broadcasting
-    /// `participant_joined`; its Join Code is not checked here, since whoever routed
-    /// the command to this Room has already resolved it. `leave` from a Participant
-    /// removes it and broadcasts `participant_left`; if it was the Facilitator, the
-    /// remaining Participant with the lowest id is promoted (`facilitator_changed`),
-    /// and if nobody remains the [`Outcome`] reports the Room ended. `leave` from
-    /// anyone not in the Room changes nothing. `create_room` or
-    /// `join_room` from a Participant is refused with `already_in_room`. `add_item`
-    /// and `activate_item` are the Facilitator's: a Voter gets `not_facilitator`.
-    /// `add_item` appends a Pending Item. `activate_item` makes a Pending Item the
-    /// Voting Active Item (sending any previous Active Item back to Pending); it
-    /// refuses an unknown id (`unknown_item`) or an Estimated Item
-    /// (`item_already_estimated`), and is a no-op on the Item already Active.
-    /// `vote` (any Participant) records or replaces the sender's Vote on a Voting
-    /// Active Item and broadcasts `vote_cast`; it refuses a value off the Scale
-    /// (`invalid_value`), no Active Item (`no_active_item`) and a Revealed Item
-    /// (`item_not_voting`). `reveal` (Facilitator) makes the Voting Active Item
-    /// Revealed and broadcasts `votes_revealed`; it refuses no Active Item
-    /// (`no_active_item`), an Item already Revealed (`item_not_voting`) and an
-    /// Item with no Votes (`no_votes`). Every other command is not modelled yet:
-    /// it is accepted with an empty [`Outcome`] and leaves the Room unchanged. Which commands a Newcomer may send at all is the
-    /// socket layer's first-message rule, not the Room's.
+    /// `create_room` from a Newcomer admits it as Participant 1 and Facilitator; the caller
+    /// applies it once, to a Room fresh from [`Room::new`]. `join_room` from a Newcomer
+    /// admits it as a Voter, replying with a snapshot and broadcasting `participant_joined`;
+    /// its Join Code is not checked here, since whoever routed the command to this Room has
+    /// already resolved it. `leave` from a Participant removes it and broadcasts
+    /// `participant_left`; if it was the Facilitator, the remaining Participant with the
+    /// lowest id is promoted (`facilitator_changed`), and if nobody remains the [`Outcome`]
+    /// reports the Room ended. `leave` from anyone not in the Room changes nothing.
+    /// `create_room` or `join_room` from a Participant is refused with `already_in_room`.
+    /// `add_item` and `activate_item` are the Facilitator's: a Voter gets `not_facilitator`.
+    /// `add_item` appends a Pending Item. `activate_item` makes a Pending Item the Voting
+    /// Active Item (sending any previous Active Item back to Pending); it refuses an unknown
+    /// id (`unknown_item`) or an Estimated Item (`item_already_estimated`), and is a no-op on
+    /// the Item already Active. `vote` (any Participant) records or replaces the sender's
+    /// Vote on a Voting Active Item and broadcasts `vote_cast`; it refuses a value off the
+    /// Scale (`invalid_value`), no Active Item (`no_active_item`) and a Revealed Item
+    /// (`item_not_voting`). `reveal` (Facilitator) makes the Voting Active Item Revealed and
+    /// broadcasts `votes_revealed`; it refuses no Active Item (`no_active_item`), an Item
+    /// already Revealed (`item_not_voting`) and an Item with no Votes (`no_votes`). Every
+    /// other command is not modelled yet: it is accepted with an empty [`Outcome`] and leaves
+    /// the Room unchanged. Which commands a Newcomer may send at all is the socket layer's
+    /// first-message rule, not the Room's.
     pub fn apply(&mut self, actor: Actor, command: Command) -> Result<Outcome, ErrorCode> {
         match (actor, command) {
             (Actor::Newcomer, Command::CreateRoom { name }) => Ok(self.create(name)),
@@ -275,11 +274,7 @@ impl Room {
         // Skipping: the old Active Item goes back to Pending and its Votes are
         // discarded with it.
         self.votes.clear();
-        if let Some(old) = self
-            .items
-            .iter_mut()
-            .find(|i| Some(i.id) == self.active_item_id)
-        {
+        if let Some(old) = self.active_item_mut() {
             old.state = ItemState::Pending;
         }
         self.items[target].state = ItemState::Voting;

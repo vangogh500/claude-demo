@@ -43,6 +43,8 @@ enum WireEvent<'a> {
     },
     VotesRevealed {
         item_id: ItemId,
+        /// Participant id (as text) to value. A JSON object has no meaningful order, so
+        /// the cast order of the Room event is not carried.
         votes: BTreeMap<String, &'a str>,
     },
     ParticipantJoined {
