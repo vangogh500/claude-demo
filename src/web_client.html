@@ -14,6 +14,8 @@
   .error { background: #fdd; padding: 0.5rem; margin: 0.5rem 0; }
   .active { font-weight: bold; background: #ffd; }
   ul, ol { padding-left: 1.25rem; }
+  .scale button { min-width: 4.5rem; min-height: 4.5rem; font-size: 1.5rem; }
+  .scale button.picked { background: #26a; color: #fff; font-weight: bold; }
 </style>
 </head>
 <body>
@@ -32,6 +34,9 @@ const state = {
   newTitle: "",          // the Facilitator's add-Item input
   room: null,            // built from room_snapshot, updated by events
 };
+
+// The Scale, in order (GLOSSARY.md).
+const SCALE = ["0", "1", "2", "3", "5", "8", "13", "20", "40", "100", "?"];
 
 let socket = null;
 
@@ -108,6 +113,9 @@ function apply(ev) {
       room.votes = null;
       room.myVote = null;
       break;
+    case "vote_cast":
+      room.voted.add(ev.participant_id);
+      break;
     case "error":
       state.connecting = false;
       state.message = ev.code;
@@ -126,6 +134,12 @@ function h(tag, props, ...children) {
 
 function send(command) {
   if (socket !== null) socket.send(JSON.stringify(command));
+}
+
+function vote(value) {
+  send({ type: "vote", value });
+  state.room.myVote = value;
+  render();
 }
 
 function addItem() {
@@ -192,6 +206,22 @@ function renderItems() {
   }));
 }
 
+// The Scale is offered only while the Active Item is Voting, to everyone.
+function renderScale() {
+  const room = state.room;
+  const active = room.items.find((item) => item.id === room.activeItemId);
+  if (!active || active.state !== "Voting") return [];
+  return [
+    h("h2", {}, "Vote"),
+    h("div", { className: "scale" }, ...SCALE.map((value) =>
+      h("button", {
+        className: room.myVote === value ? "picked" : "",
+        ariaPressed: String(room.myVote === value),
+        onclick: () => vote(value),
+      }, value))),
+  ];
+}
+
 function renderRoom() {
   const room = state.room;
   const facilitator = room.facilitatorId;
@@ -204,11 +234,13 @@ function renderRoom() {
       const marks = [];
       if (p.id === facilitator) marks.push("Facilitator");
       if (p.id === room.you) marks.push("you");
+      if (room.voted.has(p.id)) marks.push("voted");
       return h("li", {}, p.name, marks.length ? h("span", { className: "mark" }, " (" + marks.join(", ") + ")") : ""
       );
     })),
     h("h2", {}, "Items"),
     renderItems(),
+    ...renderScale(),
   ];
 }
 
