@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use story_pointing::registry::JOIN_CODE_ALPHABET;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
@@ -12,8 +13,6 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 type Client = WebSocketStream<MaybeTlsStream<TcpStream>>;
-
-const JOIN_CODE_ALPHABET: &str = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 /// A running server process, killed when dropped.
 struct Server {
@@ -93,7 +92,7 @@ fn assert_join_code_shape(code: &str) {
         "join code {code:?} has four characters"
     );
     assert!(
-        code.chars().all(|c| JOIN_CODE_ALPHABET.contains(c)),
+        code.chars().all(|c| JOIN_CODE_ALPHABET.contains(&(c as u8))),
         "join code {code:?} uses only the unambiguous alphabet"
     );
 }
