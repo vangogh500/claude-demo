@@ -64,7 +64,19 @@ pub enum Event {
     ItemActivated {
         item_id: ItemId,
     },
+    /// Names who voted, never what.
+    VoteCast {
+        participant_id: ParticipantId,
+    },
+    VotesRevealed {
+        item_id: ItemId,
+        /// Every Vote as (participant, value), in the order first cast.
+        votes: Vec<(ParticipantId, String)>,
+    },
 }
+
+/// The fixed Scale a Vote may take.
+const SCALE: [&str; 11] = ["0", "1", "2", "3", "5", "8", "13", "20", "40", "100", "?"];
 
 #[derive(Debug, PartialEq)]
 pub struct Snapshot {
@@ -74,6 +86,8 @@ pub struct Snapshot {
     pub participants: Vec<Participant>,
     pub items: Vec<ItemView>,
     pub active_item_id: Option<ItemId>,
+    /// Participants with a Vote on the Active Item.
+    pub voted: Vec<ParticipantId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -107,6 +121,10 @@ pub enum ErrorCode {
     NotFacilitator,
     UnknownItem,
     ItemAlreadyEstimated,
+    NoActiveItem,
+    ItemNotVoting,
+    InvalidValue,
+    NoVotes,
 }
 
 /// What an accepted command did.
@@ -131,6 +149,8 @@ pub struct Room {
     items: Vec<ItemView>,
     next_item_id: ItemId,
     active_item_id: Option<ItemId>,
+    /// Votes on the Active Item, in the order first cast.
+    votes: Vec<(ParticipantId, String)>,
 }
 
 impl Room {
@@ -143,6 +163,7 @@ impl Room {
             items: Vec::new(),
             next_item_id: 1,
             active_item_id: None,
+            votes: Vec::new(),
         }
     }
 
@@ -162,8 +183,12 @@ impl Room {
     /// `add_item` appends a Pending Item. `activate_item` makes a Pending Item the
     /// Voting Active Item (sending any previous Active Item back to Pending); it
     /// refuses an unknown id (`unknown_item`) or an Estimated Item
-    /// (`item_already_estimated`), and is a no-op on the Item already Active. Every
-    /// other command is not modelled yet: it is accepted with an empty [`Outcome`]
+    /// (`item_already_estimated`), and is a no-op on the Item already Active.
+    /// `vote` (any Participant) records or replaces the sender's Vote on a Voting
+    /// Active Item and broadcasts `vote_cast`; it refuses a value off the Scale
+    /// (`invalid_value`), no Active Item (`no_active_item`) and a Revealed Item
+    /// (`item_not_voting`). `reveal` (Facilitator) needs at least one Vote
+    /// (`no_votes`) and broadcasts `votes_revealed`. Every other command is not modelled yet: it is accepted with an empty [`Outcome`]
     /// and leaves the Room unchanged. Which commands a Newcomer may send at all is the
     /// socket layer's first-message rule, not the Room's.
     pub fn apply(&mut self, actor: Actor, command: Command) -> Result<Outcome, ErrorCode> {
@@ -174,17 +199,60 @@ impl Room {
             (Actor::Participant(_), Command::CreateRoom { .. } | Command::JoinRoom { .. }) => {
                 Err(ErrorCode::AlreadyInRoom)
             }
-            (Actor::Participant(me), Command::AddItem { .. } | Command::ActivateItem { .. })
-                if me != self.facilitator_id =>
-            {
-                Err(ErrorCode::NotFacilitator)
-            }
+            (
+                Actor::Participant(me),
+                Command::AddItem { .. } | Command::ActivateItem { .. } | Command::Reveal,
+            ) if me != self.facilitator_id => Err(ErrorCode::NotFacilitator),
             (Actor::Participant(_), Command::AddItem { title }) => Ok(self.add_item(title)),
             (Actor::Participant(_), Command::ActivateItem { item_id }) => {
                 self.activate_item(item_id)
             }
+            (Actor::Participant(me), Command::Vote { value }) => self.vote(me, value),
+            (Actor::Participant(_), Command::Reveal) => self.reveal(),
             _ => Ok(Outcome::default()),
         }
+    }
+
+    fn active_item_mut(&mut self) -> Option<&mut ItemView> {
+        let id = self.active_item_id?;
+        self.items.iter_mut().find(|i| i.id == id)
+    }
+
+    fn vote(&mut self, me: ParticipantId, value: String) -> Result<Outcome, ErrorCode> {
+        if !SCALE.contains(&value.as_str()) {
+            return Err(ErrorCode::InvalidValue);
+        }
+        let item = self.active_item_mut().ok_or(ErrorCode::NoActiveItem)?;
+        if item.state != ItemState::Voting {
+            return Err(ErrorCode::ItemNotVoting);
+        }
+        match self.votes.iter_mut().find(|(id, _)| *id == me) {
+            Some(vote) => vote.1 = value,
+            None => self.votes.push((me, value)),
+        }
+        Ok(Outcome {
+            broadcast: vec![Event::VoteCast { participant_id: me }],
+            ..Outcome::default()
+        })
+    }
+
+    fn reveal(&mut self) -> Result<Outcome, ErrorCode> {
+        let votes = self.votes.clone();
+        let item = self.active_item_mut().ok_or(ErrorCode::NoActiveItem)?;
+        if item.state != ItemState::Voting {
+            return Err(ErrorCode::ItemNotVoting);
+        }
+        if votes.is_empty() {
+            return Err(ErrorCode::NoVotes);
+        }
+        item.state = ItemState::Revealed;
+        Ok(Outcome {
+            broadcast: vec![Event::VotesRevealed {
+                item_id: item.id,
+                votes,
+            }],
+            ..Outcome::default()
+        })
     }
 
     fn activate_item(&mut self, item_id: ItemId) -> Result<Outcome, ErrorCode> {
@@ -201,8 +269,9 @@ impl Room {
         if self.active_item_id == Some(item_id) {
             return Ok(Outcome::default());
         }
-        // Skipping: the old Active Item goes back to Pending (its Votes, once they
-        // exist, are discarded with it).
+        // Skipping: the old Active Item goes back to Pending and its Votes are
+        // discarded with it.
+        self.votes.clear();
         if let Some(old) = self
             .items
             .iter_mut()
@@ -262,6 +331,7 @@ impl Room {
             return Outcome::default();
         };
         self.participants.remove(index);
+        self.votes.retain(|(id, _)| *id != me);
         let mut broadcast = vec![Event::ParticipantLeft { participant_id: me }];
         // Participants are kept in joining order, so the first is the lowest id.
         if let Some(first) = self.participants.first()
@@ -294,6 +364,7 @@ impl Room {
             participants: self.participants.clone(),
             items: self.items.clone(),
             active_item_id: self.active_item_id,
+            voted: self.votes.iter().map(|(id, _)| *id).collect(),
         }
     }
 }
@@ -465,6 +536,200 @@ mod tests {
         );
     }
 
+    fn vote(room: &mut Room, me: ParticipantId, value: &str) -> Result<Outcome, ErrorCode> {
+        room.apply(
+            Actor::Participant(me),
+            Command::Vote {
+                value: value.to_string(),
+            },
+        )
+    }
+
+    fn reveal(room: &mut Room, me: ParticipantId) -> Result<Outcome, ErrorCode> {
+        room.apply(Actor::Participant(me), Command::Reveal)
+    }
+
+    fn voting_room() -> Room {
+        let mut room = room_with_facilitator();
+        add(&mut room, "Login page").unwrap();
+        activate(&mut room, 1).unwrap();
+        room
+    }
+
+    #[test]
+    fn voting_broadcasts_vote_cast_naming_the_voter_and_the_facilitator_votes_too() {
+        let mut room = voting_room();
+        join(&mut room, "Bob");
+
+        let bob = vote(&mut room, 2, "5").unwrap();
+        let ada = vote(&mut room, 1, "?").unwrap();
+
+        assert_eq!(bob.broadcast, vec![Event::VoteCast { participant_id: 2 }]);
+        assert_eq!(ada.broadcast, vec![Event::VoteCast { participant_id: 1 }]);
+        assert_eq!(room.snapshot_for(1).voted, vec![2, 1]);
+    }
+
+    #[test]
+    fn voting_again_replaces_the_vote_without_duplicating_voted() {
+        let mut room = voting_room();
+        vote(&mut room, 1, "5").unwrap();
+
+        let again = vote(&mut room, 1, "8").unwrap();
+
+        assert_eq!(again.broadcast, vec![Event::VoteCast { participant_id: 1 }]);
+        assert_eq!(room.snapshot_for(1).voted, vec![1]);
+        let revealed = reveal(&mut room, 1).unwrap();
+        assert_eq!(
+            revealed.broadcast,
+            vec![Event::VotesRevealed {
+                item_id: 1,
+                votes: vec![(1, "8".to_string())]
+            }]
+        );
+    }
+
+    #[test]
+    fn every_scale_value_is_accepted_and_others_are_invalid() {
+        let mut room = voting_room();
+        for value in ["0", "1", "2", "3", "5", "8", "13", "20", "40", "100", "?"] {
+            assert!(vote(&mut room, 1, value).is_ok(), "{value}");
+        }
+        for value in ["4", "", "?!", "05", "101", "-1", "a"] {
+            assert_eq!(
+                vote(&mut room, 1, value).unwrap_err(),
+                ErrorCode::InvalidValue,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn voting_with_no_active_item_is_refused() {
+        let mut room = room_with_facilitator();
+        add(&mut room, "Login page").unwrap();
+
+        assert_eq!(
+            vote(&mut room, 1, "5").unwrap_err(),
+            ErrorCode::NoActiveItem
+        );
+    }
+
+    #[test]
+    fn voting_on_a_revealed_item_is_refused() {
+        let mut room = voting_room();
+        vote(&mut room, 1, "5").unwrap();
+        reveal(&mut room, 1).unwrap();
+
+        assert_eq!(
+            vote(&mut room, 1, "8").unwrap_err(),
+            ErrorCode::ItemNotVoting
+        );
+    }
+
+    #[test]
+    fn a_late_joiner_during_voting_can_vote_and_appears_in_voted() {
+        let mut room = voting_room();
+        vote(&mut room, 1, "5").unwrap();
+        let joined = join(&mut room, "Bob");
+        let Event::RoomSnapshot(snapshot) = &joined.reply[0] else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(snapshot.voted, vec![1]);
+
+        vote(&mut room, 2, "3").unwrap();
+
+        assert_eq!(room.snapshot_for(2).voted, vec![1, 2]);
+    }
+
+    #[test]
+    fn reveal_broadcasts_every_vote_and_makes_the_item_revealed() {
+        let mut room = voting_room();
+        join(&mut room, "Bob");
+        join(&mut room, "Cy");
+        vote(&mut room, 2, "13").unwrap();
+        vote(&mut room, 1, "5").unwrap();
+
+        let outcome = reveal(&mut room, 1).unwrap();
+
+        assert_eq!(
+            outcome.broadcast,
+            vec![Event::VotesRevealed {
+                item_id: 1,
+                votes: vec![(2, "13".to_string()), (1, "5".to_string())]
+            }]
+        );
+        assert_eq!(
+            room.snapshot_for(1).items,
+            vec![item_view(1, "Login page", ItemState::Revealed)]
+        );
+    }
+
+    #[test]
+    fn reveal_with_no_votes_is_refused_and_a_voter_cannot_reveal() {
+        let mut room = voting_room();
+        join(&mut room, "Bob");
+        assert_eq!(reveal(&mut room, 1).unwrap_err(), ErrorCode::NoVotes);
+
+        vote(&mut room, 1, "5").unwrap();
+        assert_eq!(reveal(&mut room, 2).unwrap_err(), ErrorCode::NotFacilitator);
+    }
+
+    #[test]
+    fn a_participant_leaving_before_reveal_takes_their_vote_with_them() {
+        let mut room = voting_room();
+        join(&mut room, "Bob");
+        vote(&mut room, 1, "5").unwrap();
+        vote(&mut room, 2, "8").unwrap();
+
+        leave(&mut room, 2);
+
+        assert_eq!(room.snapshot_for(1).voted, vec![1]);
+        assert_eq!(
+            reveal(&mut room, 1).unwrap().broadcast,
+            vec![Event::VotesRevealed {
+                item_id: 1,
+                votes: vec![(1, "5".to_string())]
+            }]
+        );
+    }
+
+    #[test]
+    fn skipping_the_active_item_discards_its_votes() {
+        let mut room = voting_room();
+        add(&mut room, "Logout page").unwrap();
+        vote(&mut room, 1, "5").unwrap();
+
+        activate(&mut room, 2).unwrap();
+        assert!(room.snapshot_for(1).voted.is_empty());
+
+        activate(&mut room, 1).unwrap();
+        assert!(room.snapshot_for(1).voted.is_empty());
+        assert_eq!(reveal(&mut room, 1).unwrap_err(), ErrorCode::NoVotes);
+    }
+
+    #[test]
+    fn facilitator_promotion_mid_vote_keeps_votes_and_the_new_facilitator_can_reveal() {
+        let mut room = voting_room();
+        join(&mut room, "Bob");
+        join(&mut room, "Cy");
+        vote(&mut room, 2, "8").unwrap();
+        vote(&mut room, 3, "3").unwrap();
+
+        leave(&mut room, 1);
+
+        let snapshot = room.snapshot_for(2);
+        assert_eq!(snapshot.facilitator_id, 2);
+        assert_eq!(snapshot.active_item_id, Some(1));
+        assert_eq!(snapshot.voted, vec![2, 3]);
+        assert_eq!(
+            reveal(&mut room, 2).unwrap().broadcast,
+            vec![Event::VotesRevealed {
+                item_id: 1,
+                votes: vec![(2, "8".to_string()), (3, "3".to_string())]
+            }]
+        );
+    }
+
     #[test]
     fn add_item_works_with_nobody_else_joined_and_items_keep_insertion_order() {
         let mut room = room_with_facilitator();
@@ -521,6 +786,7 @@ mod tests {
                     participants: vec![participant(1, "Ada"), participant(2, "Bob")],
                     items: vec![item_view(1, "Login page", ItemState::Voting)],
                     active_item_id: Some(1),
+                    voted: vec![],
                 })],
                 broadcast: vec![Event::ParticipantJoined {
                     participant_id: 2,
@@ -663,6 +929,7 @@ mod tests {
                     }],
                     items: vec![],
                     active_item_id: None,
+                    voted: vec![],
                 })],
                 ended: false,
             }

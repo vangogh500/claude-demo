@@ -466,3 +466,43 @@ async fn the_last_participant_leaving_ends_the_room_and_releases_its_join_code()
     )
     .await;
 }
+
+#[tokio::test]
+async fn votes_are_hidden_until_the_facilitator_reveals_them() {
+    let server = ephemeral_server().await;
+    let (mut ada, _, code) = create(&server, "Ada").await;
+    send(&mut ada, json!({"type": "add_item", "title": "Login page"})).await;
+    send(&mut ada, json!({"type": "activate_item", "item_id": 1})).await;
+    receive(&mut ada).await;
+    receive(&mut ada).await;
+    send(&mut ada, json!({"type": "vote", "value": "5"})).await;
+    assert_next(&mut ada, json!({"type": "vote_cast", "participant_id": 1})).await;
+
+    // A late joiner sees who has voted, and can vote too.
+    let (mut bob, snapshot) = join(&server, &code, "Bob").await;
+    assert_eq!(snapshot["voted"], json!([1]));
+    assert_next(
+        &mut bob,
+        json!({"type": "participant_joined", "participant_id": 2, "name": "Bob"}),
+    )
+    .await;
+    receive(&mut ada).await;
+    send(&mut bob, json!({"type": "vote", "value": "13"})).await;
+    assert_next(&mut bob, json!({"type": "vote_cast", "participant_id": 2})).await;
+    assert_next(&mut ada, json!({"type": "vote_cast", "participant_id": 2})).await;
+
+    // Errors reach the sender only; a Voter cannot reveal.
+    send(&mut bob, json!({"type": "vote", "value": "4"})).await;
+    assert_next(&mut bob, json!({"type": "error", "code": "invalid_value"})).await;
+    send(&mut bob, json!({"type": "reveal"})).await;
+    assert_next(
+        &mut bob,
+        json!({"type": "error", "code": "not_facilitator"}),
+    )
+    .await;
+
+    send(&mut ada, json!({"type": "reveal"})).await;
+    let expected = json!({"type": "votes_revealed", "item_id": 1, "votes": {"1": "5", "2": "13"}});
+    assert_next(&mut ada, expected.clone()).await;
+    assert_next(&mut bob, expected).await;
+}

@@ -3,6 +3,8 @@
 //! Translates between frames and the Room's [`Command`], [`Event`] and [`ErrorCode`]
 //! so the Room never sees JSON (ADR 0001).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::room::{Command, ErrorCode, Event, ItemId, ItemState, ItemView, ParticipantId};
@@ -34,8 +36,14 @@ enum WireEvent<'a> {
         participants: Vec<WireParticipant<'a>>,
         items: Vec<WireItem<'a>>,
         active_item_id: Option<ItemId>,
-        // Votes are not modelled yet, so a snapshot always carries none.
-        voted: [ParticipantId; 0],
+        voted: &'a [ParticipantId],
+    },
+    VoteCast {
+        participant_id: ParticipantId,
+    },
+    VotesRevealed {
+        item_id: ItemId,
+        votes: BTreeMap<String, &'a str>,
     },
     ParticipantJoined {
         participant_id: ParticipantId,
@@ -119,7 +127,7 @@ pub fn encode_event(event: &Event) -> String {
                 .collect(),
             items: snapshot.items.iter().map(WireItem::from).collect(),
             active_item_id: snapshot.active_item_id,
-            voted: [],
+            voted: &snapshot.voted,
         },
         Event::ParticipantJoined {
             participant_id,
@@ -135,6 +143,16 @@ pub fn encode_event(event: &Event) -> String {
             participant_id: *participant_id,
         },
         Event::ItemActivated { item_id } => WireEvent::ItemActivated { item_id: *item_id },
+        Event::VoteCast { participant_id } => WireEvent::VoteCast {
+            participant_id: *participant_id,
+        },
+        Event::VotesRevealed { item_id, votes } => WireEvent::VotesRevealed {
+            item_id: *item_id,
+            votes: votes
+                .iter()
+                .map(|(id, v)| (id.to_string(), v.as_str()))
+                .collect(),
+        },
         Event::ItemAdded { item_id, title } => WireEvent::ItemAdded {
             item_id: *item_id,
             title,
@@ -151,6 +169,10 @@ pub fn encode_error(code: ErrorCode) -> String {
         ErrorCode::NotFacilitator => "not_facilitator",
         ErrorCode::UnknownItem => "unknown_item",
         ErrorCode::ItemAlreadyEstimated => "item_already_estimated",
+        ErrorCode::NoActiveItem => "no_active_item",
+        ErrorCode::ItemNotVoting => "item_not_voting",
+        ErrorCode::InvalidValue => "invalid_value",
+        ErrorCode::NoVotes => "no_votes",
     };
     to_frame(&WireEvent::Error { code })
 }
@@ -202,6 +224,7 @@ mod tests {
                 },
             ],
             active_item_id: Some(2),
+            voted: vec![],
         };
 
         let frame: Value =
