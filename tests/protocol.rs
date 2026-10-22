@@ -654,3 +654,11 @@ async fn the_root_url_serves_the_web_client_as_html() {
     assert!(lower.contains("<title>story pointing</title>"));
     assert!(response.contains("Create Room"));
 }
+
+#[tokio::test]
+async fn the_web_client_mounts_on_a_web_client_element_not_an_app_one() {
+    let server = ephemeral_server().await;
+    let response = get_root(&server).await;
+    assert!(response.contains(r#"id="web-client""#));
+    assert!(!response.contains(r#"id="app""#));
+}

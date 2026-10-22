@@ -16,7 +16,7 @@
 </style>
 </head>
 <body>
-<div id="app"></div>
+<div id="web-client"></div>
 <script>
 "use strict";
 
@@ -153,7 +153,7 @@ function renderRoom() {
 
 const messageBox = h("div", {});
 const roomBox = h("div", {});
-document.getElementById("app").append(messageBox, entryView, roomBox);
+document.getElementById("web-client").append(messageBox, entryView, roomBox);
 
 function render() {
   messageBox.replaceChildren(...(state.message === null ? [] : [
