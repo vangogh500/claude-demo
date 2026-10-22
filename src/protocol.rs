@@ -138,3 +138,59 @@ pub fn encode_malformed() -> String {
 fn to_frame(wire: &WireEvent) -> String {
     serde_json::to_string(wire).expect("wire events serialize to JSON")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::room::{Participant, Snapshot};
+    use serde_json::{Value, json};
+
+    // join_room is not served yet, so no socket can receive a snapshot with Items:
+    // the wire shape is pinned here, at the encoder, until it is.
+    #[test]
+    fn a_snapshot_with_items_encodes_state_strings_result_and_active_item_id() {
+        let snapshot = Snapshot {
+            join_code: "ABCD".to_string(),
+            you: 1,
+            facilitator_id: 1,
+            participants: vec![Participant {
+                id: 1,
+                name: "Ada".to_string(),
+            }],
+            items: vec![
+                ItemView {
+                    id: 1,
+                    title: "Login page".to_string(),
+                    state: ItemState::Estimated,
+                    result: Some("5".to_string()),
+                },
+                ItemView {
+                    id: 2,
+                    title: "Logout page".to_string(),
+                    state: ItemState::Voting,
+                    result: None,
+                },
+                ItemView {
+                    id: 3,
+                    title: "Profile".to_string(),
+                    state: ItemState::Pending,
+                    result: None,
+                },
+            ],
+            active_item_id: Some(2),
+        };
+
+        let frame: Value =
+            serde_json::from_str(&encode_event(&Event::RoomSnapshot(snapshot))).unwrap();
+
+        assert_eq!(
+            frame["items"],
+            json!([
+                {"id": 1, "title": "Login page", "state": "Estimated", "result": "5"},
+                {"id": 2, "title": "Logout page", "state": "Voting", "result": null},
+                {"id": 3, "title": "Profile", "state": "Pending", "result": null},
+            ])
+        );
+        assert_eq!(frame["active_item_id"], 2);
+    }
+}

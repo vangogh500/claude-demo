@@ -92,16 +92,9 @@ pub struct Room {
     participants: Vec<Participant>,
     facilitator_id: ParticipantId,
     next_participant_id: ParticipantId,
-    items: Vec<Item>,
+    items: Vec<ItemView>,
     next_item_id: ItemId,
     active_item_id: Option<ItemId>,
-}
-
-struct Item {
-    id: ItemId,
-    title: String,
-    state: ItemState,
-    result: Option<String>,
 }
 
 impl Room {
@@ -121,9 +114,14 @@ impl Room {
     ///
     /// `create_room` from a Newcomer admits it as Participant 1 and Facilitator; the
     /// caller applies it once, to a Room fresh from [`Room::new`]. `create_room` or
-    /// `join_room` from a Participant is refused with `already_in_room`. Every other
-    /// command is not modelled yet: it is accepted with an empty [`Outcome`] and
-    /// leaves the Room unchanged. Which commands a Newcomer may send at all is the
+    /// `join_room` from a Participant is refused with `already_in_room`. `add_item`
+    /// and `activate_item` are the Facilitator's: a Voter gets `not_facilitator`.
+    /// `add_item` appends a Pending Item. `activate_item` makes a Pending Item the
+    /// Voting Active Item (sending any previous Active Item back to Pending); it
+    /// refuses an unknown id (`unknown_item`) or an Estimated Item
+    /// (`item_already_estimated`), and is a no-op on the Item already Active. Every
+    /// other command is not modelled yet: it is accepted with an empty [`Outcome`]
+    /// and leaves the Room unchanged. Which commands a Newcomer may send at all is the
     /// socket layer's first-message rule, not the Room's.
     pub fn apply(&mut self, actor: Actor, command: Command) -> Result<Outcome, ErrorCode> {
         match (actor, command) {
@@ -148,17 +146,26 @@ impl Room {
         let target = self
             .items
             .iter()
-            .find(|item| item.id == item_id)
+            .position(|item| item.id == item_id)
             .ok_or(ErrorCode::UnknownItem)?;
-        if target.state == ItemState::Estimated {
+        if self.items[target].state == ItemState::Estimated {
             return Err(ErrorCode::ItemAlreadyEstimated);
+        }
+        // The spec defines activation only for Pending Items: the Active Item is
+        // already activated, so nothing changes and nothing is broadcast.
+        if self.active_item_id == Some(item_id) {
+            return Ok(Outcome::default());
         }
         // Skipping: the old Active Item goes back to Pending (its Votes, once they
         // exist, are discarded with it).
-        if let Some(old) = self.active_item_id {
-            self.item_mut(old).state = ItemState::Pending;
+        if let Some(old) = self
+            .items
+            .iter_mut()
+            .find(|i| Some(i.id) == self.active_item_id)
+        {
+            old.state = ItemState::Pending;
         }
-        self.item_mut(item_id).state = ItemState::Voting;
+        self.items[target].state = ItemState::Voting;
         self.active_item_id = Some(item_id);
         Ok(Outcome {
             broadcast: vec![Event::ItemActivated { item_id }],
@@ -166,17 +173,10 @@ impl Room {
         })
     }
 
-    fn item_mut(&mut self, id: ItemId) -> &mut Item {
-        self.items
-            .iter_mut()
-            .find(|item| item.id == id)
-            .expect("item ids in the Room exist")
-    }
-
     fn add_item(&mut self, title: String) -> Outcome {
         let id = self.next_item_id;
         self.next_item_id += 1;
-        self.items.push(Item {
+        self.items.push(ItemView {
             id,
             title: title.clone(),
             state: ItemState::Pending,
@@ -205,22 +205,13 @@ impl Room {
         id
     }
 
-    pub fn snapshot_for(&self, you: ParticipantId) -> Snapshot {
+    fn snapshot_for(&self, you: ParticipantId) -> Snapshot {
         Snapshot {
             join_code: self.join_code.clone(),
             you,
             facilitator_id: self.facilitator_id,
             participants: self.participants.clone(),
-            items: self
-                .items
-                .iter()
-                .map(|item| ItemView {
-                    id: item.id,
-                    title: item.title.clone(),
-                    state: item.state,
-                    result: item.result.clone(),
-                })
-                .collect(),
+            items: self.items.clone(),
             active_item_id: self.active_item_id,
         }
     }
@@ -349,6 +340,25 @@ mod tests {
                 item_view(1, "Login page", ItemState::Pending),
                 item_view(2, "Logout page", ItemState::Voting),
             ]
+        );
+    }
+
+    #[test]
+    fn activating_the_already_active_item_changes_nothing_and_broadcasts_nothing() {
+        let mut room = room_with_facilitator();
+        add(&mut room, "Login page").unwrap();
+        activate(&mut room, 1).unwrap();
+        // Stand in for a Revealed Item: re-activation must not reset it to Voting.
+        room.items[0].state = ItemState::Revealed;
+
+        let outcome = activate(&mut room, 1).unwrap();
+
+        assert_eq!(outcome, Outcome::default());
+        let snapshot = room.snapshot_for(1);
+        assert_eq!(snapshot.active_item_id, Some(1));
+        assert_eq!(
+            snapshot.items,
+            vec![item_view(1, "Login page", ItemState::Revealed)]
         );
     }
 
