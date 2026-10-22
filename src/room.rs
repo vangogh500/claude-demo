@@ -579,11 +579,8 @@ mod tests {
 
     #[test]
     fn activating_an_estimated_item_is_refused() {
-        let mut room = room_with_facilitator();
-        add(&mut room, "Login page").unwrap();
-        // `accept` is not modelled yet, so put the Item in Estimated directly.
-        room.items[0].state = ItemState::Estimated;
-        room.items[0].result = Some("5".to_string());
+        let mut room = revealed_room();
+        accept(&mut room, 1, "5").unwrap();
 
         assert_eq!(
             activate(&mut room, 1).unwrap_err(),
