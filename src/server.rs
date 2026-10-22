@@ -55,6 +55,22 @@ async fn run_socket(mut socket: WebSocket, registry: Arc<Registry>) {
     let mut bound: Option<Bound> = None;
     loop {
         tokio::select! {
+            // Queued frames first: an error frame goes straight to the socket, so it
+            // must not overtake the frames of commands this socket sent before it.
+            biased;
+            frame = next_frame(&mut bound) => match frame {
+                Some(frame) => {
+                    if socket.send(Message::text(frame)).await.is_err() {
+                        break;
+                    }
+                }
+                // Defensive: the Room dropped this socket's outbox, which it does only
+                // when it ends, and it ends only once every bound socket has left.
+                None => {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
+            },
             message = socket.recv() => {
                 let reply = match message {
                     Some(Ok(Message::Text(text))) => match protocol::decode(text.as_str()) {
@@ -71,19 +87,6 @@ async fn run_socket(mut socket: WebSocket, registry: Arc<Registry>) {
                     break;
                 }
             }
-            frame = next_frame(&mut bound) => match frame {
-                Some(frame) => {
-                    if socket.send(Message::text(frame)).await.is_err() {
-                        break;
-                    }
-                }
-                // Defensive: the Room dropped this socket's outbox, which it does only
-                // when it ends, and it ends only once every bound socket has left.
-                None => {
-                    let _ = socket.send(Message::Close(None)).await;
-                    break;
-                }
-            },
         }
     }
     if let Some(Bound { room, me, .. }) = bound {

@@ -368,6 +368,32 @@ async fn an_error_inside_a_room_reaches_only_the_sender() {
 }
 
 #[tokio::test]
+async fn a_pipelined_error_arrives_after_the_frames_of_earlier_commands() {
+    let server = ephemeral_server().await;
+    let (_ada, _, code) = create(&server, "Ada").await;
+
+    // Several joiners, so an ordering the server leaves to chance shows up.
+    for _ in 0..10 {
+        let mut bob = connect(&server).await;
+        // Both frames in one write, with no receive between them: the refusal of
+        // the second must not overtake the frames the first produced.
+        let join = json!({"type": "join_room", "join_code": code, "name": "Bob"});
+        let add = json!({"type": "add_item", "title": "Nope"});
+        bob.feed(Message::text(join.to_string())).await.unwrap();
+        bob.feed(Message::text(add.to_string())).await.unwrap();
+        bob.flush().await.unwrap();
+
+        assert_eq!(receive(&mut bob).await["type"], "room_snapshot");
+        assert_eq!(receive(&mut bob).await["type"], "participant_joined");
+        assert_next(
+            &mut bob,
+            json!({"type": "error", "code": "not_facilitator"}),
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn a_voter_disconnecting_is_announced_to_the_rest_of_the_room() {
     let server = ephemeral_server().await;
     let (mut ada, _, code) = create(&server, "Ada").await;
