@@ -64,8 +64,9 @@ async fn run_socket(mut socket: WebSocket, registry: Arc<Registry>) {
                         break;
                     }
                 }
-                // Defensive: the Room dropped this socket's outbox, which it does only
-                // when it ends, and it ends only once every bound socket has left.
+                // Defensive: the Registry dropped this socket's outbox, which it does
+                // only when the Room ends, and a Room ends only once every bound
+                // socket has left.
                 None => {
                     let _ = socket.send(Message::Close(None)).await;
                     break;

@@ -17,7 +17,8 @@ const JOIN_CODE_LEN: usize = 4;
 
 /// Where a socket bound to a Room receives its frames: the reply to its own
 /// command and every broadcast in the Room, in the order the Room produced them.
-/// The Room drops the sender when the socket's Participant leaves or the Room ends.
+/// The Registry drops the sender when the socket's Participant leaves or the Room
+/// ends; the Room itself knows no sockets (ADR 0001).
 pub type Outbox = UnboundedSender<String>;
 
 /// A Room shared by the sockets bound to it. Each command holds the Room's lock for
