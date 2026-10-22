@@ -231,6 +231,14 @@ impl Room {
         }
     }
 
+    fn voting_item_mut(&mut self) -> Result<&mut ItemView, ErrorCode> {
+        let item = self.active_item_mut().ok_or(ErrorCode::NoActiveItem)?;
+        if item.state != ItemState::Voting {
+            return Err(ErrorCode::ItemNotVoting);
+        }
+        Ok(item)
+    }
+
     fn revealed_item_mut(&mut self) -> Result<&mut ItemView, ErrorCode> {
         let item = self.active_item_mut().ok_or(ErrorCode::NoActiveItem)?;
         if item.state != ItemState::Revealed {
@@ -278,10 +286,7 @@ impl Room {
         if !SCALE.contains(&value.as_str()) {
             return Err(ErrorCode::InvalidValue);
         }
-        let item = self.active_item_mut().ok_or(ErrorCode::NoActiveItem)?;
-        if item.state != ItemState::Voting {
-            return Err(ErrorCode::ItemNotVoting);
-        }
+        self.voting_item_mut()?;
         match self.votes.iter_mut().find(|(id, _)| *id == me) {
             Some(vote) => vote.1 = value,
             None => self.votes.push((me, value)),
@@ -294,10 +299,7 @@ impl Room {
 
     fn reveal(&mut self) -> Result<Outcome, ErrorCode> {
         let has_votes = !self.votes.is_empty();
-        let item = self.active_item_mut().ok_or(ErrorCode::NoActiveItem)?;
-        if item.state != ItemState::Voting {
-            return Err(ErrorCode::ItemNotVoting);
-        }
+        let item = self.voting_item_mut()?;
         if !has_votes {
             return Err(ErrorCode::NoVotes);
         }
