@@ -8,7 +8,7 @@ A team that estimates work together needs everyone to pick a number independentl
 
 ## Solution
 
-A server that hosts pointing Rooms over websockets. A Facilitator creates a Room and shares its Join Code; Participants join by name. The Facilitator adds Items and activates one at a time; everyone Votes from a fixed Scale, seeing who has voted but not what; the Facilitator Reveals, optionally calls a re-vote, and records a Result. Every Participant receives the same stream of events, and a late joiner receives a full snapshot on arrival. There is no client in this version: the protocol is the product, and any websocket client (including `websocat`) can drive it.
+A server that hosts pointing Rooms over websockets. A Facilitator creates a Room and shares its Join Code; Participants join by name. The Facilitator adds Items and activates one at a time; everyone Votes from a fixed Scale, seeing who has voted but not what; the Facilitator Reveals, optionally calls a re-vote, and records a Result. Every Participant receives the same stream of events, and a late joiner receives a full snapshot on arrival. The protocol is the product, and any websocket client (including `websocat`) can drive it; the server also serves a Web Client at `GET /` (`docs/specs/web-client.md`).
 
 ## User Stories
 

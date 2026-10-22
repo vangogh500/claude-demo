@@ -8,7 +8,7 @@
   body { font-family: system-ui, sans-serif; max-width: 36rem; margin: 1rem auto; padding: 0 1rem; line-height: 1.4; }
   label { display: block; margin: 0.75rem 0 0.25rem; }
   input { font-size: 1rem; padding: 0.5rem; width: 100%; box-sizing: border-box; }
-  button { font-size: 1rem; padding: 0.5rem 1rem; margin: 0.5rem 0.5rem 0 0; }
+  button { font-size: 1rem; padding: 0.5rem 1rem; margin: 0.5rem 0.5rem 0 0; min-height: 2.75rem; }
   .code { font-size: 2.5rem; font-weight: bold; letter-spacing: 0.2em; }
   .mark { color: #555; font-size: 0.9rem; }
   .error { background: #fdd; padding: 0.5rem; margin: 0.5rem 0; }
@@ -16,7 +16,6 @@
   ul, ol { padding-left: 1.25rem; }
   .notice { background: #def; padding: 0.5rem; margin: 0.5rem 0; }
   .scale { display: flex; flex-wrap: wrap; }
-  button { min-height: 2.75rem; }
   .scale button { min-width: 4.5rem; min-height: 4.5rem; font-size: 1.5rem; }
   .scale button.picked { background: #26a; color: #fff; font-weight: bold; }
 </style>
@@ -27,13 +26,18 @@
 "use strict";
 
 // The single state object. The view is rendered from it alone; no element holds
-// state of its own. Later tickets extend this state and the render function.
+// state of its own.
+function fragmentCode() {
+  const raw = location.hash.slice(1);
+  try { return decodeURIComponent(raw); } catch (e) { return raw; }
+}
+
 const state = {
   screen: "entry",       // "entry" | "room" | "disconnected"
   connecting: false,     // a connection attempt is in flight
   name: "",
-  joinCode: location.hash.slice(1),
-  message: null,         // a dismissable error code, shown as a sentence
+  joinCode: fragmentCode(),
+  errorCode: null,       // a dismissable error code, shown as a sentence
   notice: null,          // a dismissable notice, already a sentence
   newTitle: "",          // the Facilitator's add-Item input
   room: null,            // built from room_snapshot, updated by events
@@ -58,6 +62,9 @@ const ERRORS = {
   no_votes: "Nobody has voted yet, so there is nothing to Reveal.",
   connection_closed: "Could not connect to the server.",
 };
+
+// Refusals that mean the viewer's last-sent Vote was not recorded.
+const VOTE_ERRORS = ["item_not_voting", "invalid_value", "no_active_item"];
 
 function errorText(code) { return ERRORS[code] || code; }
 
@@ -95,7 +102,7 @@ function connect(firstCommand) {
     socket = null;
     state.connecting = false;
     if (state.screen === "room") state.screen = "disconnected";
-    else if (state.message === null) state.message = "connection_closed";
+    else if (state.errorCode === null) state.errorCode = "connection_closed";
     render();
   };
   render();
@@ -104,11 +111,11 @@ function connect(firstCommand) {
 function normalizedCode() { return state.joinCode.trim().toUpperCase(); }
 
 function createRoom() {
-  connect({ type: "create_room", name: state.name });
+  connect({ type: "create_room", name: state.name.trim() });
 }
 
 function joinRoom() {
-  connect({ type: "join_room", join_code: normalizedCode(), name: state.name });
+  connect({ type: "join_room", join_code: normalizedCode(), name: state.name.trim() });
 }
 
 function apply(ev) {
@@ -129,7 +136,8 @@ function apply(ev) {
       state.screen = "room";
       state.connecting = false;
       state.joinCode = ev.join_code;
-      state.message = null;
+      history.replaceState(null, "", "#" + encodeURIComponent(ev.join_code));
+      state.errorCode = null;
       state.notice = null;
       break;
     case "participant_joined":
@@ -173,7 +181,8 @@ function apply(ev) {
       break;
     case "error":
       state.connecting = false;
-      state.message = ev.code;
+      state.errorCode = ev.code;
+      if (room && VOTE_ERRORS.includes(ev.code)) room.myVote = null;
       break;
   }
 }
@@ -192,6 +201,7 @@ function send(command) {
 }
 
 function vote(value) {
+  if (socket === null) return;
   send({ type: "vote", value });
   state.room.myVote = value;
   render();
@@ -241,7 +251,6 @@ const backlog = (() => {
 })();
 
 function renderBacklog() {
-  const room = state.room;
   backlog.box.hidden = !isFacilitator();
   if (backlog.title.value !== state.newTitle) backlog.title.value = state.newTitle;
   backlog.add.disabled = state.newTitle.trim() === "";
@@ -259,6 +268,23 @@ function renderItems() {
     }
     return li;
   }));
+}
+
+// One button per Scale value; onPick receives the value, picked marks one.
+function scaleButtons(onPick, picked) {
+  return h("div", { className: "scale" }, ...SCALE.map((value) =>
+    h("button", {
+      className: picked === value ? "picked" : "",
+      ariaPressed: String(picked === value),
+      onclick: () => onPick(value),
+    }, value)));
+}
+
+// Sort key for a revealed value: Scale order, values off the Scale after, ? last.
+function voteRank(value) {
+  if (value === "?") return Infinity;
+  const i = SCALE.indexOf(value);
+  return i < 0 ? SCALE.length : i;
 }
 
 // Reveal and the revealed Votes. Votes are listed in Scale order, ? last, with
@@ -279,14 +305,14 @@ function renderReveal() {
     out.push(h("p", {}, "The Votes were revealed before you joined."));
   } else {
     const nameOf = (id) => (room.participants.find((p) => String(p.id) === id) || { name: id }).name;
-    const rows = Object.entries(room.votes).sort((a, b) => SCALE.indexOf(a[1]) - SCALE.indexOf(b[1]));
-    out.push(h("ul", {}, ...rows.map(([id, value]) => h("li", {}, nameOf(id) + ": " + value))));
+    const rows = Object.entries(room.votes).sort((a, b) => voteRank(a[1]) - voteRank(b[1]));
+    if (rows.length === 0) out.push(h("p", {}, "No Votes remain: everyone who voted has left."));
+    else out.push(h("ul", {}, ...rows.map(([id, value]) => h("li", {}, nameOf(id) + ": " + value))));
   }
   if (facilitator) {
     out.push(h("button", { onclick: () => send({ type: "revote" }) }, "Re-vote"));
     out.push(h("h2", {}, "Accept a Result"));
-    out.push(h("div", { className: "scale" }, ...SCALE.map((value) =>
-      h("button", { onclick: () => send({ type: "accept", value }) }, value))));
+    out.push(scaleButtons((value) => send({ type: "accept", value }), null));
   }
   return out;
 }
@@ -298,18 +324,13 @@ function renderScale() {
   if (!active || active.state !== "Voting") return [];
   return [
     h("h2", {}, "Vote"),
-    h("div", { className: "scale" }, ...SCALE.map((value) =>
-      h("button", {
-        className: room.myVote === value ? "picked" : "",
-        ariaPressed: String(room.myVote === value),
-        onclick: () => vote(value),
-      }, value))),
+    scaleButtons(vote, room.myVote),
   ];
 }
 
 function renderRoom() {
   const room = state.room;
-  const facilitator = room.facilitatorId;
+  const facilitatorId = room.facilitatorId;
   return [
     h("h1", {}, "Room"),
     h("div", { className: "code" }, room.joinCode),
@@ -317,7 +338,7 @@ function renderRoom() {
     h("h2", {}, "Participants"),
     h("ul", {}, ...room.participants.map((p) => {
       const marks = [];
-      if (p.id === facilitator) marks.push("Facilitator");
+      if (p.id === facilitatorId) marks.push("Facilitator");
       if (p.id === room.you) marks.push("you");
       if (room.voted.has(p.id)) marks.push("voted");
       return h("li", {}, p.name, marks.length ? h("span", { className: "mark" }, " (" + marks.join(", ") + ")") : ""
@@ -333,6 +354,8 @@ function renderRoom() {
 function rejoin() {
   state.room = null;
   state.notice = null;
+  state.errorCode = null;
+  state.newTitle = "";
   state.screen = "entry";
   render();
 }
@@ -353,9 +376,9 @@ function render() {
     boxes.push(h("div", { className: "notice" }, state.notice,
       h("button", { onclick: () => { state.notice = null; render(); } }, "Dismiss")));
   }
-  if (state.message !== null) {
-    boxes.push(h("div", { className: "error" }, errorText(state.message),
-      h("button", { onclick: () => { state.message = null; render(); } }, "Dismiss")));
+  if (state.errorCode !== null) {
+    boxes.push(h("div", { className: "error" }, errorText(state.errorCode),
+      h("button", { onclick: () => { state.errorCode = null; render(); } }, "Dismiss")));
   }
   messageBox.replaceChildren(...boxes);
   entryView.hidden = state.screen !== "entry";
