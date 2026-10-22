@@ -228,3 +228,211 @@ async fn the_facilitator_adds_and_activates_items_and_hears_the_events() {
         json!({"type": "error", "code": "unknown_item"})
     );
 }
+
+/// Asserts that `client`'s next frame is `expected`. Used after an action whose
+/// event must reach `client` to show that nothing else reached it first.
+async fn assert_next(client: &mut Client, expected: Value) {
+    assert_eq!(receive(client).await, expected);
+}
+
+/// Creates a Room as `name` and returns the client, its participant id and the
+/// Room's Join Code.
+async fn create(server: &Server, name: &str) -> (Client, Value, String) {
+    let mut client = connect(server).await;
+    send(&mut client, json!({"type": "create_room", "name": name})).await;
+    let snapshot = receive(&mut client).await;
+    let code = snapshot["join_code"].as_str().unwrap().to_string();
+    (client, snapshot["you"].clone(), code)
+}
+
+/// Joins the Room under `code` as `name` and returns the client and its snapshot,
+/// leaving its own `participant_joined` unread.
+async fn join(server: &Server, code: &str, name: &str) -> (Client, Value) {
+    let mut client = connect(server).await;
+    send(
+        &mut client,
+        json!({"type": "join_room", "join_code": code, "name": name}),
+    )
+    .await;
+    let snapshot = receive(&mut client).await;
+    assert_eq!(snapshot["type"], "room_snapshot");
+    (client, snapshot)
+}
+
+/// Closes `client` and waits for the server to finish the close handshake.
+async fn close(mut client: Client) {
+    client.close(None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(Ok(_)) = client.next().await {}
+    })
+    .await
+    .expect("the server ends the connection in time");
+}
+
+#[tokio::test]
+async fn a_joiner_gets_a_snapshot_and_everyone_hears_participant_joined() {
+    let server = ephemeral_server().await;
+    let (mut ada, ada_id, code) = create(&server, "Ada").await;
+    send(&mut ada, json!({"type": "add_item", "title": "Login page"})).await;
+    receive(&mut ada).await;
+
+    let (mut bob, snapshot) = join(&server, &code, "Bob").await;
+
+    let bob_id = snapshot["you"].clone();
+    assert_ne!(bob_id, ada_id);
+    assert_eq!(snapshot["join_code"], code.as_str());
+    assert_eq!(snapshot["facilitator_id"], ada_id);
+    assert_eq!(
+        snapshot["participants"],
+        json!([{"id": ada_id, "name": "Ada"}, {"id": bob_id, "name": "Bob"}])
+    );
+    assert_eq!(
+        snapshot["items"],
+        json!([{"id": 1, "title": "Login page", "state": "Pending", "result": null}])
+    );
+    let joined = json!({"type": "participant_joined", "participant_id": bob_id, "name": "Bob"});
+    assert_next(&mut bob, joined.clone()).await;
+    assert_next(&mut ada, joined).await;
+}
+
+#[tokio::test]
+async fn two_participants_may_share_a_display_name() {
+    let server = ephemeral_server().await;
+    let (mut ada, ada_id, code) = create(&server, "Ada").await;
+
+    let (_other_ada, snapshot) = join(&server, &code, "Ada").await;
+
+    let other_id = snapshot["you"].clone();
+    assert_ne!(other_id, ada_id);
+    assert_next(
+        &mut ada,
+        json!({"type": "participant_joined", "participant_id": other_id, "name": "Ada"}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_unknown_join_code_is_refused_to_that_socket_only() {
+    let server = ephemeral_server().await;
+    let (mut ada, _, code) = create(&server, "Ada").await;
+    let mut bob = connect(&server).await;
+
+    // `0` and `O` are never issued, so this code cannot name a live Room.
+    send(
+        &mut bob,
+        json!({"type": "join_room", "join_code": "0O0O", "name": "Bob"}),
+    )
+    .await;
+
+    assert_next(
+        &mut bob,
+        json!({"type": "error", "code": "unknown_join_code"}),
+    )
+    .await;
+    // Ada's next frame is her own Item: nothing about Bob reached her.
+    send(&mut ada, json!({"type": "add_item", "title": "Login page"})).await;
+    assert_next(
+        &mut ada,
+        json!({"type": "item_added", "item_id": 1, "title": "Login page"}),
+    )
+    .await;
+    // Bob is still unbound and can join for real.
+    send(
+        &mut bob,
+        json!({"type": "join_room", "join_code": code, "name": "Bob"}),
+    )
+    .await;
+    assert_eq!(receive(&mut bob).await["type"], "room_snapshot");
+}
+
+#[tokio::test]
+async fn an_error_inside_a_room_reaches_only_the_sender() {
+    let server = ephemeral_server().await;
+    let (mut ada, _, code) = create(&server, "Ada").await;
+    let (mut bob, _) = join(&server, &code, "Bob").await;
+    receive(&mut bob).await;
+    receive(&mut ada).await;
+
+    send(&mut bob, json!({"type": "add_item", "title": "Nope"})).await;
+
+    assert_next(
+        &mut bob,
+        json!({"type": "error", "code": "not_facilitator"}),
+    )
+    .await;
+    // Each socket's next frame is Ada's Item: Bob's error reached neither again.
+    send(&mut ada, json!({"type": "add_item", "title": "Login page"})).await;
+    let added = json!({"type": "item_added", "item_id": 1, "title": "Login page"});
+    assert_next(&mut ada, added.clone()).await;
+    assert_next(&mut bob, added).await;
+}
+
+#[tokio::test]
+async fn a_voter_disconnecting_is_announced_to_the_rest_of_the_room() {
+    let server = ephemeral_server().await;
+    let (mut ada, _, code) = create(&server, "Ada").await;
+    let (bob, snapshot) = join(&server, &code, "Bob").await;
+    receive(&mut ada).await;
+
+    close(bob).await;
+
+    assert_next(
+        &mut ada,
+        json!({"type": "participant_left", "participant_id": snapshot["you"]}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_facilitator_disconnecting_promotes_the_lowest_remaining_id() {
+    let server = ephemeral_server().await;
+    let (ada, ada_id, code) = create(&server, "Ada").await;
+    let (mut bob, bob_snapshot) = join(&server, &code, "Bob").await;
+    let (mut cy, _) = join(&server, &code, "Cy").await;
+    receive(&mut bob).await; // Bob joined
+    receive(&mut bob).await; // Cy joined
+    receive(&mut cy).await; // Cy joined
+
+    close(ada).await;
+
+    let left = json!({"type": "participant_left", "participant_id": ada_id});
+    let promoted = json!({"type": "facilitator_changed", "participant_id": bob_snapshot["you"]});
+    for client in [&mut bob, &mut cy] {
+        assert_next(client, left.clone()).await;
+        assert_next(client, promoted.clone()).await;
+    }
+    // The promoted Bob now steers the Room.
+    send(&mut bob, json!({"type": "add_item", "title": "Login page"})).await;
+    assert_next(
+        &mut bob,
+        json!({"type": "item_added", "item_id": 1, "title": "Login page"}),
+    )
+    .await;
+}
+
+// A Room ends only when its last socket leaves, so no other socket is ever still
+// attached when it does: what a client can observe is that the leaver's connection
+// is ended and the Join Code stops resolving.
+#[tokio::test]
+async fn the_last_participant_leaving_ends_the_room_and_releases_its_join_code() {
+    let server = ephemeral_server().await;
+    let (mut ada, _, code) = create(&server, "Ada").await;
+    let (bob, _) = join(&server, &code, "Bob").await;
+    receive(&mut ada).await;
+
+    close(bob).await;
+    receive(&mut ada).await; // Bob left
+    close(ada).await;
+
+    let mut late = connect(&server).await;
+    send(
+        &mut late,
+        json!({"type": "join_room", "join_code": code, "name": "Late"}),
+    )
+    .await;
+    assert_next(
+        &mut late,
+        json!({"type": "error", "code": "unknown_join_code"}),
+    )
+    .await;
+}

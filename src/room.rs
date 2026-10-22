@@ -8,17 +8,34 @@ pub type ParticipantId = u32;
 /// An Item's id: assigned by the Room in the order Items are added.
 pub type ItemId = u32;
 
-/// Everything a client can ask of a Room, as named in the spec's wire protocol.
+/// Everything that can be applied to a Room: the spec's eight wire commands, plus
+/// [`Command::Leave`], which no client sends.
 #[derive(Debug)]
 pub enum Command {
-    CreateRoom { name: String },
-    JoinRoom { join_code: String, name: String },
-    AddItem { title: String },
-    ActivateItem { item_id: ItemId },
-    Vote { value: String },
+    CreateRoom {
+        name: String,
+    },
+    JoinRoom {
+        join_code: String,
+        name: String,
+    },
+    AddItem {
+        title: String,
+    },
+    ActivateItem {
+        item_id: ItemId,
+    },
+    Vote {
+        value: String,
+    },
     Reveal,
     Revote,
-    Accept { value: String },
+    Accept {
+        value: String,
+    },
+    /// The sender has gone: the socket layer applies this when a bound socket
+    /// closes. It is not part of the wire protocol.
+    Leave,
 }
 
 /// Who sends a command: someone not yet in the Room, or one of its Participants.
@@ -30,8 +47,23 @@ pub enum Actor {
 #[derive(Debug, PartialEq)]
 pub enum Event {
     RoomSnapshot(Snapshot),
-    ItemAdded { item_id: ItemId, title: String },
-    ItemActivated { item_id: ItemId },
+    ParticipantJoined {
+        participant_id: ParticipantId,
+        name: String,
+    },
+    ParticipantLeft {
+        participant_id: ParticipantId,
+    },
+    FacilitatorChanged {
+        participant_id: ParticipantId,
+    },
+    ItemAdded {
+        item_id: ItemId,
+        title: String,
+    },
+    ItemActivated {
+        item_id: ItemId,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -71,6 +103,7 @@ pub struct Participant {
 pub enum ErrorCode {
     NotInRoom,
     AlreadyInRoom,
+    UnknownJoinCode,
     NotFacilitator,
     UnknownItem,
     ItemAlreadyEstimated,
@@ -85,6 +118,9 @@ pub struct Outcome {
     pub reply: Vec<Event>,
     /// Events for every Participant in the Room, the sender included.
     pub broadcast: Vec<Event>,
+    /// The command left the Room with no Participants: the Room has ended, and its
+    /// owner should drop it and release its Join Code.
+    pub ended: bool,
 }
 
 pub struct Room {
@@ -113,7 +149,14 @@ impl Room {
     /// Applies `command` sent by `actor`.
     ///
     /// `create_room` from a Newcomer admits it as Participant 1 and Facilitator; the
-    /// caller applies it once, to a Room fresh from [`Room::new`]. `create_room` or
+    /// caller applies it once, to a Room fresh from [`Room::new`]. `join_room` from a
+    /// Newcomer admits it as a Voter, replying with a snapshot and broadcasting
+    /// `participant_joined`; its Join Code is not checked here, since whoever routed
+    /// the command to this Room has already resolved it. `leave` from a Participant
+    /// removes it and broadcasts `participant_left`; if it was the Facilitator, the
+    /// remaining Participant with the lowest id is promoted (`facilitator_changed`),
+    /// and if nobody remains the [`Outcome`] reports the Room ended. `leave` from
+    /// anyone not in the Room changes nothing. `create_room` or
     /// `join_room` from a Participant is refused with `already_in_room`. `add_item`
     /// and `activate_item` are the Facilitator's: a Voter gets `not_facilitator`.
     /// `add_item` appends a Pending Item. `activate_item` makes a Pending Item the
@@ -126,6 +169,8 @@ impl Room {
     pub fn apply(&mut self, actor: Actor, command: Command) -> Result<Outcome, ErrorCode> {
         match (actor, command) {
             (Actor::Newcomer, Command::CreateRoom { name }) => Ok(self.create(name)),
+            (Actor::Newcomer, Command::JoinRoom { name, .. }) => Ok(self.join(name)),
+            (Actor::Participant(me), Command::Leave) => Ok(self.leave(me)),
             (Actor::Participant(_), Command::CreateRoom { .. } | Command::JoinRoom { .. }) => {
                 Err(ErrorCode::AlreadyInRoom)
             }
@@ -195,6 +240,42 @@ impl Room {
             admitted: Some(id),
             broadcast: Vec::new(),
             reply: vec![Event::RoomSnapshot(self.snapshot_for(id))],
+            ended: false,
+        }
+    }
+
+    fn join(&mut self, name: String) -> Outcome {
+        let id = self.admit(name.clone());
+        Outcome {
+            admitted: Some(id),
+            reply: vec![Event::RoomSnapshot(self.snapshot_for(id))],
+            broadcast: vec![Event::ParticipantJoined {
+                participant_id: id,
+                name,
+            }],
+            ended: false,
+        }
+    }
+
+    fn leave(&mut self, me: ParticipantId) -> Outcome {
+        let Some(index) = self.participants.iter().position(|p| p.id == me) else {
+            return Outcome::default();
+        };
+        self.participants.remove(index);
+        let mut broadcast = vec![Event::ParticipantLeft { participant_id: me }];
+        // Participants are kept in joining order, so the first is the lowest id.
+        if let Some(first) = self.participants.first()
+            && me == self.facilitator_id
+        {
+            self.facilitator_id = first.id;
+            broadcast.push(Event::FacilitatorChanged {
+                participant_id: first.id,
+            });
+        }
+        Outcome {
+            broadcast,
+            ended: self.participants.is_empty(),
+            ..Outcome::default()
         }
     }
 
@@ -399,6 +480,161 @@ mod tests {
         );
     }
 
+    fn join(room: &mut Room, name: &str) -> Outcome {
+        room.apply(
+            Actor::Newcomer,
+            Command::JoinRoom {
+                join_code: "ABCD".to_string(),
+                name: name.to_string(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn leave(room: &mut Room, me: ParticipantId) -> Outcome {
+        room.apply(Actor::Participant(me), Command::Leave).unwrap()
+    }
+
+    fn participant(id: ParticipantId, name: &str) -> Participant {
+        Participant {
+            id,
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn join_room_admits_a_voter_with_a_snapshot_and_broadcasts_participant_joined() {
+        let mut room = room_with_facilitator();
+        add(&mut room, "Login page").unwrap();
+        activate(&mut room, 1).unwrap();
+
+        let outcome = join(&mut room, "Bob");
+
+        assert_eq!(
+            outcome,
+            Outcome {
+                admitted: Some(2),
+                reply: vec![Event::RoomSnapshot(Snapshot {
+                    join_code: "ABCD".to_string(),
+                    you: 2,
+                    facilitator_id: 1,
+                    participants: vec![participant(1, "Ada"), participant(2, "Bob")],
+                    items: vec![item_view(1, "Login page", ItemState::Voting)],
+                    active_item_id: Some(1),
+                })],
+                broadcast: vec![Event::ParticipantJoined {
+                    participant_id: 2,
+                    name: "Bob".to_string()
+                }],
+                ended: false,
+            }
+        );
+    }
+
+    #[test]
+    fn two_participants_may_share_a_display_name() {
+        let mut room = room_with_facilitator();
+
+        let outcome = join(&mut room, "Ada");
+
+        assert_eq!(outcome.admitted, Some(2));
+        assert_eq!(
+            room.snapshot_for(2).participants,
+            vec![participant(1, "Ada"), participant(2, "Ada")]
+        );
+    }
+
+    #[test]
+    fn a_voter_leaving_broadcasts_participant_left_and_the_facilitator_stays() {
+        let mut room = room_with_facilitator();
+        join(&mut room, "Bob");
+        join(&mut room, "Cy");
+
+        let outcome = leave(&mut room, 2);
+
+        assert_eq!(
+            outcome,
+            Outcome {
+                broadcast: vec![Event::ParticipantLeft { participant_id: 2 }],
+                ..Outcome::default()
+            }
+        );
+        let snapshot = room.snapshot_for(1);
+        assert_eq!(snapshot.facilitator_id, 1);
+        assert_eq!(
+            snapshot.participants,
+            vec![participant(1, "Ada"), participant(3, "Cy")]
+        );
+    }
+
+    #[test]
+    fn the_facilitator_leaving_promotes_the_lowest_remaining_id() {
+        let mut room = room_with_facilitator();
+        join(&mut room, "Bob");
+        join(&mut room, "Cy");
+        join(&mut room, "Dee");
+        leave(&mut room, 2);
+
+        let outcome = leave(&mut room, 1);
+
+        assert_eq!(
+            outcome.broadcast,
+            vec![
+                Event::ParticipantLeft { participant_id: 1 },
+                Event::FacilitatorChanged { participant_id: 3 },
+            ]
+        );
+        assert!(!outcome.ended);
+        assert_eq!(room.snapshot_for(3).facilitator_id, 3);
+    }
+
+    #[test]
+    fn a_promoted_facilitator_may_steer_and_the_active_item_survives() {
+        let mut room = room_with_facilitator();
+        add(&mut room, "Login page").unwrap();
+        activate(&mut room, 1).unwrap();
+        join(&mut room, "Bob");
+
+        leave(&mut room, 1);
+
+        assert_eq!(room.snapshot_for(2).active_item_id, Some(1));
+        assert!(
+            room.apply(
+                Actor::Participant(2),
+                Command::AddItem {
+                    title: "Next".to_string()
+                }
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_last_participant_leaving_reports_the_room_ended() {
+        let mut room = room_with_facilitator();
+        join(&mut room, "Bob");
+        assert!(!leave(&mut room, 1).ended);
+
+        let outcome = leave(&mut room, 2);
+
+        assert_eq!(
+            outcome,
+            Outcome {
+                broadcast: vec![Event::ParticipantLeft { participant_id: 2 }],
+                ended: true,
+                ..Outcome::default()
+            }
+        );
+    }
+
+    #[test]
+    fn leaving_as_someone_not_in_the_room_changes_nothing_and_does_not_report_ended() {
+        let mut room = room_with_facilitator();
+        leave(&mut room, 1);
+
+        assert_eq!(leave(&mut room, 1), Outcome::default());
+    }
+
     #[test]
     fn create_room_makes_the_creator_the_facilitator_and_only_participant() {
         let mut room = Room::new("ABCD".to_string());
@@ -428,6 +664,7 @@ mod tests {
                     items: vec![],
                     active_item_id: None,
                 })],
+                ended: false,
             }
         );
     }

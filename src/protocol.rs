@@ -37,6 +37,16 @@ enum WireEvent<'a> {
         // Votes are not modelled yet, so a snapshot always carries none.
         voted: [ParticipantId; 0],
     },
+    ParticipantJoined {
+        participant_id: ParticipantId,
+        name: &'a str,
+    },
+    ParticipantLeft {
+        participant_id: ParticipantId,
+    },
+    FacilitatorChanged {
+        participant_id: ParticipantId,
+    },
     ItemActivated {
         item_id: ItemId,
     },
@@ -111,6 +121,19 @@ pub fn encode_event(event: &Event) -> String {
             active_item_id: snapshot.active_item_id,
             voted: [],
         },
+        Event::ParticipantJoined {
+            participant_id,
+            name,
+        } => WireEvent::ParticipantJoined {
+            participant_id: *participant_id,
+            name,
+        },
+        Event::ParticipantLeft { participant_id } => WireEvent::ParticipantLeft {
+            participant_id: *participant_id,
+        },
+        Event::FacilitatorChanged { participant_id } => WireEvent::FacilitatorChanged {
+            participant_id: *participant_id,
+        },
         Event::ItemActivated { item_id } => WireEvent::ItemActivated { item_id: *item_id },
         Event::ItemAdded { item_id, title } => WireEvent::ItemAdded {
             item_id: *item_id,
@@ -124,6 +147,7 @@ pub fn encode_error(code: ErrorCode) -> String {
     let code = match code {
         ErrorCode::NotInRoom => "not_in_room",
         ErrorCode::AlreadyInRoom => "already_in_room",
+        ErrorCode::UnknownJoinCode => "unknown_join_code",
         ErrorCode::NotFacilitator => "not_facilitator",
         ErrorCode::UnknownItem => "unknown_item",
         ErrorCode::ItemAlreadyEstimated => "item_already_estimated",
@@ -145,8 +169,8 @@ mod tests {
     use crate::room::{Participant, Snapshot};
     use serde_json::{Value, json};
 
-    // join_room is not served yet, so no socket can receive a snapshot with Items:
-    // the wire shape is pinned here, at the encoder, until it is.
+    // No socket can reach an Estimated Item until `accept` is modelled, so the wire
+    // shape of every Item state is pinned here, at the encoder, until it is.
     #[test]
     fn a_snapshot_with_items_encodes_state_strings_result_and_active_item_id() {
         let snapshot = Snapshot {
