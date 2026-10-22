@@ -90,7 +90,7 @@ A server that hosts pointing Rooms over websockets. A Facilitator creates a Room
 ### Language and runtime
 
 - Rust, `tokio` runtime, `axum` for the HTTP server and websocket upgrade. One binary crate.
-- One endpoint: `GET /ws`. Bind address from a `--bind` flag or `BIND` environment variable, default `127.0.0.1:8080`. Nothing else is served.
+- Two endpoints: `GET /ws` for the protocol, and `GET /` for the Web Client (added by the Web Client spec, `docs/specs/web-client.md`; ADR 0002). Bind address from a `--bind` flag or `BIND` environment variable, default `127.0.0.1:8080`. Nothing else is served.
 - All state in memory; many Rooms per process; nothing survives restart.
 
 ### Room as a transport-free state machine (ADR 0001)
@@ -170,7 +170,7 @@ Prior art: none in this repo; it is empty. Tests follow the standard Rust layout
 
 ## Out of Scope
 
-- Any client: web UI, CLI, TUI. `websocat` is the demo client.
+- A CLI or TUI client. The Web Client is now specified separately in `docs/specs/web-client.md`; `websocat` remains a valid Client.
 - Authentication, accounts, or reconnecting as the same Participant.
 - Persistence of Rooms, Items or Results across restarts; history or export of Results.
 - Per-Room Scale selection, T-shirt sizes, custom decks.

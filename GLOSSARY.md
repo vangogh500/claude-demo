@@ -1,6 +1,6 @@
 # Story Pointing
 
-A server that lets a group estimate work items together over websockets: hidden picks, then a reveal. The only surface is the protocol; there is no shipped client.
+A server that lets a group estimate work items together over websockets: hidden picks, then a reveal. The protocol is the product; the Web Client is one way to drive it.
 
 ## Language
 
@@ -47,3 +47,10 @@ _Avoid_: Flip, show
 **Scale**:
 The fixed set of values a Vote may take: modified Fibonacci (`0, 1, 2, 3, 5, 8, 13, 20, 40, 100`) plus `?`. The same for every Room.
 _Avoid_: Deck, card set
+
+**Client**:
+Anything that speaks the protocol on a Participant's behalf, such as `websocat` or the Web Client.
+
+**Web Client**:
+The browser page the server itself serves, which drives the full protocol for one Participant.
+_Avoid_: UI, frontend, app
