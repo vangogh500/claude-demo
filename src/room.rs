@@ -747,6 +747,21 @@ mod tests {
     }
 
     #[test]
+    fn revealing_an_item_already_revealed_is_refused_and_changes_nothing() {
+        let mut room = voting_room();
+        vote(&mut room, 1, "5").unwrap();
+        reveal(&mut room, 1).unwrap();
+
+        assert_eq!(reveal(&mut room, 1).unwrap_err(), ErrorCode::ItemNotVoting);
+        let snapshot = room.snapshot_for(1);
+        assert_eq!(
+            snapshot.items,
+            vec![item_view(1, "Login page", ItemState::Revealed)]
+        );
+        assert_eq!(snapshot.voted, vec![1]);
+    }
+
+    #[test]
     fn a_participant_leaving_before_reveal_takes_their_vote_with_them() {
         let mut room = voting_room();
         join(&mut room, "Bob");
