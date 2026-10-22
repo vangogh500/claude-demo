@@ -12,7 +12,8 @@
   .code { font-size: 2.5rem; font-weight: bold; letter-spacing: 0.2em; }
   .mark { color: #555; font-size: 0.9rem; }
   .error { background: #fdd; padding: 0.5rem; margin: 0.5rem 0; }
-  ul { padding-left: 1.25rem; }
+  .active { font-weight: bold; background: #ffd; }
+  ul, ol { padding-left: 1.25rem; }
 </style>
 </head>
 <body>
@@ -28,6 +29,7 @@ const state = {
   name: "",
   joinCode: location.hash.slice(1),
   message: null,         // a dismissable notice or error
+  newTitle: "",          // the Facilitator's add-Item input
   room: null,            // built from room_snapshot, updated by events
 };
 
@@ -73,6 +75,8 @@ function apply(ev) {
         items: ev.items,
         activeItemId: ev.active_item_id,
         voted: new Set(ev.voted),
+        votes: null,       // revealed Votes, when present
+        myVote: null,      // the viewer's own last-sent Vote value
       };
       state.screen = "room";
       state.connecting = false;
@@ -91,6 +95,19 @@ function apply(ev) {
     case "facilitator_changed":
       room.facilitatorId = ev.participant_id;
       break;
+    case "item_added":
+      room.items.push({ id: ev.item_id, title: ev.title, state: "Pending", result: null });
+      break;
+    case "item_activated":
+      for (const item of room.items) {
+        if (item.id === room.activeItemId && item.state !== "Estimated") item.state = "Pending";
+        if (item.id === ev.item_id) item.state = "Voting";
+      }
+      room.activeItemId = ev.item_id;
+      room.voted = new Set();
+      room.votes = null;
+      room.myVote = null;
+      break;
     case "error":
       state.connecting = false;
       state.message = ev.code;
@@ -105,6 +122,18 @@ function h(tag, props, ...children) {
     el.append(child);
   }
   return el;
+}
+
+function send(command) {
+  if (socket !== null) socket.send(JSON.stringify(command));
+}
+
+function addItem() {
+  const title = state.newTitle.trim();
+  if (title === "") return;
+  send({ type: "add_item", title });
+  state.newTitle = "";
+  render();
 }
 
 function shareLink() {
@@ -133,6 +162,36 @@ function renderEntry() {
   entry.join.disabled = blocked;
 }
 
+// The add-Item controls are created once and kept across renders, like the
+// entry inputs; render only sets value/disabled/hidden from state.
+const backlog = (() => {
+  const title = h("input", { id: "item-title", oninput: (e) => { state.newTitle = e.target.value; render(); } });
+  const add = h("button", { onclick: addItem }, "Add Item");
+  const box = h("div", {}, h("label", { htmlFor: "item-title" }, "New Item title"), title, add);
+  return { title, add, box };
+})();
+
+function renderBacklog() {
+  const room = state.room;
+  backlog.box.hidden = room.facilitatorId !== room.you;
+  if (backlog.title.value !== state.newTitle) backlog.title.value = state.newTitle;
+  backlog.add.disabled = state.newTitle.trim() === "";
+}
+
+function renderItems() {
+  const room = state.room;
+  const isFacilitator = room.facilitatorId === room.you;
+  return h("ol", {}, ...room.items.map((item) => {
+    const active = item.id === room.activeItemId;
+    const li = h("li", { className: active ? "active" : "" }, item.title,
+      h("span", { className: "mark" }, " (" + item.state + (item.result !== null ? ": " + item.result : "") + ")"));
+    if (isFacilitator && item.state === "Pending") {
+      li.append(h("button", { onclick: () => send({ type: "activate_item", item_id: item.id }) }, "Activate"));
+    }
+    return li;
+  }));
+}
+
 function renderRoom() {
   const room = state.room;
   const facilitator = room.facilitatorId;
@@ -148,11 +207,15 @@ function renderRoom() {
       return h("li", {}, p.name, marks.length ? h("span", { className: "mark" }, " (" + marks.join(", ") + ")") : ""
       );
     })),
+    h("h2", {}, "Items"),
+    renderItems(),
   ];
 }
 
 const messageBox = h("div", {});
 const roomBox = h("div", {});
+const roomTop = h("div", {});
+roomBox.append(roomTop, backlog.box);
 document.getElementById("web-client").append(messageBox, entryView, roomBox);
 
 function render() {
@@ -162,7 +225,7 @@ function render() {
   entryView.hidden = state.screen !== "entry";
   roomBox.hidden = state.screen !== "room";
   if (state.screen === "entry") renderEntry();
-  else roomBox.replaceChildren(...renderRoom());
+  else { roomTop.replaceChildren(...renderRoom()); renderBacklog(); }
 }
 
 render();
