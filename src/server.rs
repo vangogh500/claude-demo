@@ -1,4 +1,5 @@
-//! The websocket layer: serves `GET /ws`, decodes each text frame into a command,
+//! The server layer: serves the Web Client page at `GET /`, and the websocket layer
+//! at `GET /ws`, which decodes each text frame into a command,
 //! applies it to the socket's Room and writes the Room's events out as frames.
 //!
 //! A socket starts unbound. While unbound, `create_room` creates a Room and
@@ -21,7 +22,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::Response;
+use axum::response::{Html, Response};
 use axum::routing::get;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -30,13 +31,21 @@ use crate::protocol;
 use crate::registry::{HostedRoom, Registry};
 use crate::room::{Command, ErrorCode, ParticipantId};
 
-/// Serves `GET /ws` on `listener` until the process ends, with a fresh, empty
-/// registry of Rooms.
+/// The Web Client: one hand-written page, compiled in (ADR 0002).
+const WEB_CLIENT: &str = include_str!("web_client.html");
+
+/// Serves `GET /` (the Web Client) and `GET /ws` on `listener` until the process
+/// ends, with a fresh, empty registry of Rooms.
 pub async fn serve(listener: TcpListener) -> std::io::Result<()> {
     let app = Router::new()
+        .route("/", get(web_client))
         .route("/ws", get(upgrade))
         .with_state(Arc::new(Registry::default()));
     axum::serve(listener, app).await
+}
+
+async fn web_client() -> Html<&'static str> {
+    Html(WEB_CLIENT)
 }
 
 async fn upgrade(ws: WebSocketUpgrade, State(registry): State<Arc<Registry>>) -> Response {

@@ -627,3 +627,30 @@ async fn late_joiners_see_voting_and_revealed_items_and_the_active_item_id() {
     );
     assert_eq!(snapshot["active_item_id"], json!(2));
 }
+
+/// Sends a bare `GET /` over a raw socket and returns the whole response, headers and body.
+async fn get_root(server: &Server) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = TcpStream::connect(&server.addr).await.unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = String::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_string(&mut response))
+        .await
+        .expect("the response arrives in time")
+        .expect("the response is UTF-8");
+    response
+}
+
+#[tokio::test]
+async fn the_root_url_serves_the_web_client_as_html() {
+    let server = ephemeral_server().await;
+    let response = get_root(&server).await;
+    let lower = response.to_lowercase();
+    assert!(response.starts_with("HTTP/1.1 200"), "got {response:.80}");
+    assert!(lower.contains("content-type: text/html"), "got {response:.200}");
+    assert!(lower.contains("<title>story pointing</title>"));
+    assert!(response.contains("Create Room"));
+}

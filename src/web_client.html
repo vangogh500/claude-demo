@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Story Pointing</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 36rem; margin: 1rem auto; padding: 0 1rem; line-height: 1.4; }
+  label { display: block; margin: 0.75rem 0 0.25rem; }
+  input { font-size: 1rem; padding: 0.5rem; width: 100%; box-sizing: border-box; }
+  button { font-size: 1rem; padding: 0.5rem 1rem; margin: 0.5rem 0.5rem 0 0; }
+  .code { font-size: 2.5rem; font-weight: bold; letter-spacing: 0.2em; }
+  .mark { color: #555; font-size: 0.9rem; }
+  .error { background: #fdd; padding: 0.5rem; margin: 0.5rem 0; }
+  ul { padding-left: 1.25rem; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+"use strict";
+
+// The single state object. The view is rendered from it alone; no element holds
+// state of its own. Later tickets extend this state and the render function.
+const state = {
+  screen: "entry",       // "entry" | "room" | "disconnected"
+  name: "",
+  joinCode: location.hash.slice(1),
+  focus: null,           // id of the input to keep focus on across renders
+  message: null,         // a dismissable notice or error
+  room: null,            // built from room_snapshot, updated by events
+};
+
+let socket = null;
+
+function connect(firstCommand) {
+  const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+  socket = new WebSocket(scheme + "//" + location.host + "/ws");
+  socket.onopen = () => socket.send(JSON.stringify(firstCommand));
+  socket.onmessage = (e) => { apply(JSON.parse(e.data)); render(); };
+  socket.onclose = () => {
+    if (socket !== null) { state.screen = "disconnected"; socket = null; render(); }
+  };
+}
+
+function normalizedCode() { return state.joinCode.trim().toUpperCase(); }
+
+function createRoom() {
+  connect({ type: "create_room", name: state.name });
+}
+
+function joinRoom() {
+  connect({ type: "join_room", join_code: normalizedCode(), name: state.name });
+}
+
+function apply(ev) {
+  const room = state.room;
+  switch (ev.type) {
+    case "room_snapshot":
+      state.room = {
+        joinCode: ev.join_code,
+        you: ev.you,
+        facilitatorId: ev.facilitator_id,
+        participants: ev.participants,
+        items: ev.items,
+        activeItemId: ev.active_item_id,
+        voted: new Set(ev.voted),
+      };
+      state.screen = "room";
+      state.joinCode = ev.join_code;
+      state.message = null;
+      break;
+    case "participant_joined":
+      room.participants.push({ id: ev.participant_id, name: ev.name });
+      break;
+    case "participant_left":
+      room.participants = room.participants.filter((p) => p.id !== ev.participant_id);
+      room.voted.delete(ev.participant_id);
+      break;
+    case "facilitator_changed":
+      room.facilitatorId = ev.participant_id;
+      break;
+    case "error":
+      if (state.room === null) { state.screen = "entry"; }
+      state.message = ev.code;
+      break;
+  }
+}
+
+function h(tag, props, ...children) {
+  const el = document.createElement(tag);
+  Object.assign(el, props || {});
+  for (const child of children) {
+    el.append(child);
+  }
+  return el;
+}
+
+function shareLink() {
+  return location.origin + location.pathname + "#" + state.room.joinCode;
+}
+
+function renderEntry() {
+  const nameEmpty = state.name.trim() === "";
+  return [
+    h("h1", {}, "Story Pointing"),
+    h("label", { htmlFor: "name" }, "Display name"),
+    h("input", { id: "name", value: state.name, oninput: (e) => { state.name = e.target.value; state.focus = "name"; render(); } }),
+    h("button", { disabled: nameEmpty, onclick: createRoom }, "Create Room"),
+    h("label", { htmlFor: "code" }, "Join Code"),
+    h("input", { id: "code", value: state.joinCode, oninput: (e) => { state.joinCode = e.target.value; state.focus = "code"; render(); } }),
+    h("button", { disabled: nameEmpty, onclick: joinRoom }, "Join"),
+  ];
+}
+
+function renderRoom() {
+  const room = state.room;
+  const facilitator = room.facilitatorId;
+  return [
+    h("h1", {}, "Room"),
+    h("div", { className: "code" }, room.joinCode),
+    h("p", {}, "Share link: ", h("a", { href: shareLink() }, shareLink())),
+    h("h2", {}, "Participants"),
+    h("ul", {}, ...room.participants.map((p) => {
+      const marks = [];
+      if (p.id === facilitator) marks.push("Facilitator");
+      if (p.id === room.you) marks.push("you");
+      return h("li", {}, p.name, marks.length ? h("span", { className: "mark" }, " (" + marks.join(", ") + ")") : ""
+      );
+    })),
+  ];
+}
+
+function renderDisconnected() {
+  return [
+    h("h1", {}, "Disconnected"),
+    h("p", {}, "You are no longer in the Room. Rejoining makes you a new Participant and drops your Vote."),
+    h("button", { onclick: () => { state.screen = "entry"; state.room = null; render(); } }, "Rejoin"),
+  ];
+}
+
+function render() {
+  const app = document.getElementById("app");
+  const views = { entry: renderEntry, room: renderRoom, disconnected: renderDisconnected };
+  const children = [];
+  if (state.message !== null) {
+    children.push(h("div", { className: "error" }, state.message,
+      h("button", { onclick: () => { state.message = null; render(); } }, "Dismiss")));
+  }
+  children.push(...views[state.screen]());
+  app.replaceChildren(...children);
+  if (state.focus !== null) {
+    const el = document.getElementById(state.focus);
+    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+  }
+}
+
+render();
+</script>
+</body>
+</html>
