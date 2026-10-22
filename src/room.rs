@@ -201,8 +201,8 @@ impl Room {
     /// broadcasts `votes_cleared`. `accept` (Facilitator) records a Scale value (`invalid_value`
     /// otherwise; it need not match any Vote) as the Revealed Active Item's Result, makes it
     /// Estimated, leaves no Active Item and broadcasts `item_estimated`. Both refuse no Active
-    /// Item (`no_active_item`) and an Item not Revealed (`item_not_revealed`). Which commands a Newcomer may send at all is the socket layer's
-    /// first-message rule, not the Room's.
+    /// Item (`no_active_item`) and an Item not Revealed (`item_not_revealed`). Which commands a
+    /// Newcomer may send at all is the socket layer's first-message rule, not the Room's.
     pub fn apply(&mut self, actor: Actor, command: Command) -> Result<Outcome, ErrorCode> {
         match (actor, command) {
             (Actor::Newcomer, Command::CreateRoom { name }) => Ok(self.create(name)),
@@ -936,6 +936,31 @@ mod tests {
             vec![item_view(1, "Login page", ItemState::Revealed)]
         );
         assert!(accept(&mut room, 1, "?").is_ok());
+    }
+
+    #[test]
+    fn after_accept_the_room_refuses_item_commands_and_the_estimated_item_cannot_be_reactivated() {
+        let mut room = revealed_room();
+        accept(&mut room, 1, "5").unwrap();
+
+        assert_eq!(
+            vote(&mut room, 2, "5").unwrap_err(),
+            ErrorCode::NoActiveItem
+        );
+        assert_eq!(reveal(&mut room, 1).unwrap_err(), ErrorCode::NoActiveItem);
+        assert_eq!(revote(&mut room, 1).unwrap_err(), ErrorCode::NoActiveItem);
+        assert_eq!(
+            accept(&mut room, 1, "8").unwrap_err(),
+            ErrorCode::NoActiveItem
+        );
+        assert_eq!(
+            activate(&mut room, 1).unwrap_err(),
+            ErrorCode::ItemAlreadyEstimated
+        );
+        // Refusals changed nothing: the Result stands and no Item is active.
+        let snapshot = room.snapshot_for(1);
+        assert_eq!(snapshot.items[0].result.as_deref(), Some("5"));
+        assert_eq!(snapshot.active_item_id, None);
     }
 
     #[test]
