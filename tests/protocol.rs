@@ -589,3 +589,42 @@ async fn a_whole_session_runs_end_to_end_through_revote_and_accept() {
     assert_eq!(snapshot["active_item_id"], Value::Null);
     assert_eq!(snapshot["voted"], json!([]));
 }
+
+#[tokio::test]
+async fn late_joiners_see_voting_and_revealed_items_and_the_active_item_id() {
+    let server = ephemeral_server().await;
+    let (mut ada, _, code) = create(&server, "Ada").await;
+    for title in ["Login page", "Search"] {
+        send(&mut ada, json!({"type": "add_item", "title": title})).await;
+        receive(&mut ada).await;
+    }
+    send(&mut ada, json!({"type": "activate_item", "item_id": 2})).await;
+    receive(&mut ada).await;
+
+    // Joining during Voting: the Active Item is Voting, the other still Pending.
+    let (_bob, snapshot) = join(&server, &code, "Bob").await;
+    receive(&mut ada).await;
+    assert_eq!(
+        snapshot["items"],
+        json!([
+            {"id": 1, "title": "Login page", "state": "Pending", "result": null},
+            {"id": 2, "title": "Search", "state": "Voting", "result": null},
+        ])
+    );
+    assert_eq!(snapshot["active_item_id"], json!(2));
+
+    // Joining after Reveal: the Active Item is Revealed and still active.
+    send(&mut ada, json!({"type": "vote", "value": "5"})).await;
+    receive(&mut ada).await;
+    send(&mut ada, json!({"type": "reveal"})).await;
+    receive(&mut ada).await;
+    let (_cy, snapshot) = join(&server, &code, "Cy").await;
+    assert_eq!(
+        snapshot["items"],
+        json!([
+            {"id": 1, "title": "Login page", "state": "Pending", "result": null},
+            {"id": 2, "title": "Search", "state": "Revealed", "result": null},
+        ])
+    );
+    assert_eq!(snapshot["active_item_id"], json!(2));
+}
