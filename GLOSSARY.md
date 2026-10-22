@@ -17,7 +17,7 @@ A connected person in a Room, known by a display name. One socket is one Partici
 _Avoid_: User, member, player
 
 **Facilitator**:
-The Participant who created the Room. Adds Items, picks the active Item, triggers Reveal and re-votes. Also votes.
+The Participant who created the Room, or was promoted when the Facilitator left. Adds Items, picks the active Item, triggers Reveal and re-votes. Also votes.
 _Avoid_: Host, owner, admin, moderator
 
 **Voter**:
