@@ -187,9 +187,11 @@ impl Room {
     /// `vote` (any Participant) records or replaces the sender's Vote on a Voting
     /// Active Item and broadcasts `vote_cast`; it refuses a value off the Scale
     /// (`invalid_value`), no Active Item (`no_active_item`) and a Revealed Item
-    /// (`item_not_voting`). `reveal` (Facilitator) needs at least one Vote
-    /// (`no_votes`) and broadcasts `votes_revealed`. Every other command is not modelled yet: it is accepted with an empty [`Outcome`]
-    /// and leaves the Room unchanged. Which commands a Newcomer may send at all is the
+    /// (`item_not_voting`). `reveal` (Facilitator) makes the Voting Active Item
+    /// Revealed and broadcasts `votes_revealed`; it refuses no Active Item
+    /// (`no_active_item`), an Item already Revealed (`item_not_voting`) and an
+    /// Item with no Votes (`no_votes`). Every other command is not modelled yet:
+    /// it is accepted with an empty [`Outcome`] and leaves the Room unchanged. Which commands a Newcomer may send at all is the
     /// socket layer's first-message rule, not the Room's.
     pub fn apply(&mut self, actor: Actor, command: Command) -> Result<Outcome, ErrorCode> {
         match (actor, command) {
@@ -237,19 +239,20 @@ impl Room {
     }
 
     fn reveal(&mut self) -> Result<Outcome, ErrorCode> {
-        let votes = self.votes.clone();
+        let has_votes = !self.votes.is_empty();
         let item = self.active_item_mut().ok_or(ErrorCode::NoActiveItem)?;
         if item.state != ItemState::Voting {
             return Err(ErrorCode::ItemNotVoting);
         }
-        if votes.is_empty() {
+        if !has_votes {
             return Err(ErrorCode::NoVotes);
         }
         item.state = ItemState::Revealed;
+        let item_id = item.id;
         Ok(Outcome {
             broadcast: vec![Event::VotesRevealed {
-                item_id: item.id,
-                votes,
+                item_id,
+                votes: self.votes.clone(),
             }],
             ..Outcome::default()
         })
@@ -639,6 +642,25 @@ mod tests {
         vote(&mut room, 2, "3").unwrap();
 
         assert_eq!(room.snapshot_for(2).voted, vec![1, 2]);
+    }
+
+    #[test]
+    fn a_late_joiner_after_reveal_sees_a_revealed_item_and_who_voted_but_no_values() {
+        let mut room = voting_room();
+        vote(&mut room, 1, "5").unwrap();
+        reveal(&mut room, 1).unwrap();
+
+        let joined = join(&mut room, "Bob");
+
+        let Event::RoomSnapshot(snapshot) = &joined.reply[0] else {
+            panic!("expected a snapshot");
+        };
+        assert_eq!(
+            snapshot.items,
+            vec![item_view(1, "Login page", ItemState::Revealed)]
+        );
+        assert_eq!(snapshot.active_item_id, Some(1));
+        assert_eq!(snapshot.voted, vec![1]);
     }
 
     #[test]
